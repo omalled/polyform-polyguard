@@ -332,7 +332,8 @@ fn decode_canonical_key(encoded: &[u8]) -> Option<[u8; 16]> {
 
     let mut decoded = [0_u8; 16];
     let mut output = 0;
-    for quartet in encoded[..20].chunks_exact(4) {
+    for start in [0, 4, 8, 12, 16] {
+        let quartet = &encoded[start..start + 4];
         let a = base64_value(quartet[0])?;
         let b = base64_value(quartet[1])?;
         let c = base64_value(quartet[2])?;
