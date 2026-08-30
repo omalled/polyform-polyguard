@@ -410,7 +410,7 @@ dependencies = [
 
 [[package]]
 name = "polyform-polyguard"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "polyform-runtime",
  "serde",

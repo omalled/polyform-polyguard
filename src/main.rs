@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use polyform_polyguard::{proxy, registered_implementations};
 
 const HELP: &str = "\
-Polyguard 0.1.0 — security-first HTTP/1.1 reverse proxy
+Polyguard 0.1.1 — security-first HTTP/1.1 reverse proxy
 
 Usage: polyguard --config <FILE>
        polyguard --check-config <FILE>

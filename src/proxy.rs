@@ -29,7 +29,7 @@ use crate::{
 const MAX_REQUEST_LINE_BYTES: usize = 8_192;
 const MAX_REQUEST_HEADER_BYTES: usize = 32_768;
 const MAX_TRAILER_BYTES: usize = 8_192;
-const SERVER_HEADER: &[u8] = b"server: polyguard/0.1.0\r\n";
+const SERVER_HEADER: &[u8] = b"server: polyguard/0.1.1\r\n";
 
 static TERMINATE: AtomicBool = AtomicBool::new(false);
 
@@ -469,11 +469,7 @@ impl Agreement {
             trace_call(
                 function,
                 implementation.id,
-                if outcome.is_ok() {
-                    "success"
-                } else {
-                    "failure"
-                },
+                telemetry_call_outcome(outcome.is_ok()),
             );
             called += 1;
             if let Some(expected) = &reference {
@@ -562,6 +558,10 @@ fn trace_call(function: &str, implementation: &str, outcome: &str) {
     });
 }
 
+fn telemetry_call_outcome(success: bool) -> &'static str {
+    if success { "ok" } else { "error" }
+}
+
 fn mark_trace_disagreement(function: &str) {
     CALL_TRACE.with(|trace| {
         for call in trace
@@ -569,7 +569,7 @@ fn mark_trace_disagreement(function: &str) {
             .iter_mut()
             .filter(|call| call.spec_function == function)
         {
-            call.outcome = "disagreement".into();
+            call.outcome = "error".into();
         }
     });
 }
@@ -1683,5 +1683,19 @@ mod tests {
         assert_eq!(calls[0].implementation_id, "request-line-reverse-offsets");
         let telemetry = serde_json::to_string(&calls).unwrap();
         assert!(!telemetry.contains("GET /"));
+    }
+
+    #[test]
+    fn hosted_telemetry_uses_the_server_call_outcome_vocabulary() {
+        assert_eq!(telemetry_call_outcome(true), "ok");
+        assert_eq!(telemetry_call_outcome(false), "error");
+
+        begin_trace();
+        trace_call("parse_request_line", "request-line-state-pipeline", "ok");
+        mark_trace_disagreement("parse_request_line");
+        let calls = take_trace();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].outcome, "error");
+        assert!(["ok", "error", "timeout", "panic"].contains(&calls[0].outcome.as_str()));
     }
 }

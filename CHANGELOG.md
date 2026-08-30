@@ -5,6 +5,15 @@ after the initial experimental release.
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-08-30
+
+### Fixed
+
+- Map per-call runtime telemetry to the hosted API's documented bounded outcome vocabulary so
+  successful requests, ordinary failures, and disagreement-classified executions are accepted.
+
+## [0.1.0] - 2026-08-30
+
 ### Added
 
 - Security-first HTTP/1.1 reverse proxy foundation.
