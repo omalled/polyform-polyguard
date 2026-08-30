@@ -1,0 +1,75 @@
+{
+  "schema_version": 1,
+  "function": "normalize_request_target",
+  "seed": 1,
+  "case": 9,
+  "original_input": {
+    "request": {
+      "bytes_consumed": 0,
+      "method": "get",
+      "target": "/bad%GG",
+      "version": "http11"
+    }
+  },
+  "minimized_input": {
+    "request": {
+      "bytes_consumed": 0,
+      "method": "get",
+      "target": "/bad%GG",
+      "version": "http11"
+    }
+  },
+  "outcomes": [
+    {
+      "implementation": "request-target-rule-table",
+      "result": {
+        "error": {
+          "invalid_target": {
+            "reason": "invalid_percent_encoding"
+          }
+        }
+      }
+    },
+    {
+      "implementation": "request-target-validated-pipeline",
+      "result": {
+        "error": {
+          "invalid_target": {
+            "reason": "invalid_percent_encoding"
+          }
+        }
+      }
+    },
+    {
+      "implementation": "request-target-invariant-offsets",
+      "result": {
+        "error": {
+          "invalid_target": {
+            "reason": "invalid_percent_encoding"
+          }
+        }
+      }
+    },
+    {
+      "implementation": "request-target-typed-rule-matrix",
+      "result": {
+        "error": {
+          "invalid_target": {
+            "reason": "invalid_percent"
+          }
+        }
+      }
+    },
+    {
+      "implementation": "request-target-composable-validators",
+      "result": {
+        "error": {
+          "invalid_target": {
+            "reason": "invalid_percent_encoding"
+          }
+        }
+      }
+    }
+  ],
+  "shrink_evaluations": 5
+}

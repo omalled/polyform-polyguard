@@ -1,0 +1,10 @@
+/target
+vendor/polyform-runtime/target/
+.polyform/
+.env
+*.key
+*.pem
+*.token
+polyform-token*
+installation-*.json
+telemetry-*.jsonl

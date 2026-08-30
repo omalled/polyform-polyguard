@@ -1,0 +1,37 @@
+schema_version = 1
+
+[project]
+name = "polyform-polyguard"
+version = "0.1.0"
+repository = "https://github.com/omalled/polyform-polyguard"
+spec_paths = ["specs/polyform.toml"]
+source_paths = ["Cargo.toml", "Cargo.lock", "src", "tests", "fuzz/counterexamples", "vendor/polyform-runtime", "Dockerfile", "polyguard.example.toml", "scripts", "README.md", "docs"]
+
+[[checks]]
+name = "format"
+command = ["cargo", "fmt", "--", "--check"]
+
+[[checks]]
+name = "strict-lints"
+command = ["cargo", "clippy", "--all-targets", "--", "-D", "warnings"]
+
+[[checks]]
+name = "tests"
+command = ["cargo", "test", "--all-targets"]
+
+[[checks]]
+name = "fuzz-driver"
+command = ["cargo", "build", "--locked", "--bin", "polyguard-fuzz"]
+
+[fuzz]
+command = ["target/debug/polyguard-fuzz"]
+cases = 100
+seed = 1
+run_on_check = true
+corpus_dir = "fuzz/counterexamples"
+
+[release]
+build_command = ["cargo", "build", "--release", "--locked"]
+manifest_command = ["cargo", "run", "--quiet", "--bin", "polyguard-manifest"]
+artifact = "target/release/polyguard"
+artifact_name = "polyguard-aarch64-apple-darwin"

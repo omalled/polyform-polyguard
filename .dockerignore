@@ -1,0 +1,8 @@
+target
+.git
+.polyform
+*.key
+*.pem
+*.token
+polyguard.toml
+telemetry-*.jsonl

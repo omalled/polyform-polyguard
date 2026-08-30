@@ -1,0 +1,35 @@
+[listener]
+address = "127.0.0.1:8080"
+trust_forwarding_headers = false
+security_mode = "agreement"
+agreement_implementations = 2
+max_connections = 1024
+request_header_timeout_ms = 5000
+request_body_timeout_ms = 30000
+upstream_connect_timeout_ms = 3000
+upstream_response_timeout_ms = 30000
+graceful_shutdown_timeout_ms = 10000
+
+[limits]
+max_request_body_bytes = 16777216
+max_response_header_bytes = 32768
+max_response_body_bytes = 67108864
+
+[[upstreams]]
+name = "app"
+address = "127.0.0.1:3000"
+
+[[routes]]
+host = "example.test"
+path_prefix = "/"
+upstream = "app"
+
+# Enable after installing a published Polyform release and its release-trust file.
+# [polyform]
+# base_url = "https://omalled.com/polyform"
+# trust_file = "/etc/polyguard/release-trust.json"
+# state_file = "/var/lib/polyguard/composition.json"
+# strategy = "balanced"
+# refresh_interval_seconds = 300
+# report_telemetry = true
+# required = true

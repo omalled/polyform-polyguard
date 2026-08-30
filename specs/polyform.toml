@@ -1,0 +1,388 @@
+schema_version = 1
+application = "polyform-polyguard"
+release = "0.1.0"
+purpose = """
+Polyguard is a security-first HTTP/1.1 reverse proxy. These bounded deterministic functions are the interpretation and policy core used by the real network service. The proxy compares typed results from independently selected implementations and rejects and closes on disagreement. Functions perform no network, filesystem, clock, random, locale, DNS, TLS, logging, or process-global operations; do not recurse in proportion to input; and terminate in O(input plus collection size), except stated sorting. Limits are inclusive and checked before proportional allocation.
+
+All public models derive Debug, Clone, PartialEq, Eq, serde::Serialize, and serde::Deserialize; enum tags and errors serialize snake_case. Names are canonical lowercase ASCII unless stated. HeaderField={name:String,value:Vec<u8>}; HeaderBlock={fields:Vec<HeaderField>,bytes_consumed:usize}; RequestLine={method:String,target:String,version:HttpVersion,bytes_consumed:usize}; HttpVersion has only Http11. BodyFraming is None, ContentLength(u64), or Chunked. ChunkMeta={size:u64,extensions:Vec<ChunkExtension>,bytes_consumed:usize}; ChunkExtension={name:String,value:Option<String>}; TrailerBlock={fields:Vec<HeaderField>,bytes_consumed:usize}. TargetForm is Origin, Absolute, Authority, or Asterisk. NormalizedTarget={form:TargetForm,scheme:Option<String>,authority:Option<String>,path_and_query:String,routing_path:String}. EffectiveAuthority={host:String,port:Option<u16>}. SanitizedHeaders={fields:Vec<HeaderField>,removed_names:Vec<String>}. CanonicalRequestHead={bytes:Vec<u8>,body_framing:BodyFraming}. RouteRule={host:String,path_prefix:String,upstream:String,declaration_order:usize}; RouteMatch={upstream:String,declaration_order:usize}. ForwardingPolicy={trust_incoming:bool,client_ip:String,proto:String,host:String}; ForwardingResult={forwarded:String,x_forwarded_for:String,x_forwarded_proto:String,x_forwarded_host:String}. UpgradeDecision is Reject, WebSocket, or None. TelemetryOutcome={category:OutcomeCategory,success:bool}; OutcomeCategory is Accepted, ClientSyntax, AmbiguousFraming, PolicyRejected, RouteMissing, UpstreamFailure, Timeout, ImplementationDisagreement, or InternalFailure.
+
+PolyguardError variants are Incomplete; LimitExceeded{limit:String,max:usize,actual:usize}; InvalidRequestLine{reason:String}; UnsupportedVersion; InvalidMethod; InvalidTarget{reason:String}; InvalidHeader{index:usize,reason:String}; TooManyHeaders; InvalidContentLength; ConflictingContentLength; InvalidTransferEncoding; AmbiguousFraming; InvalidChunk{reason:String}; InvalidTrailer{reason:String}; MissingHost; MultipleHost; AuthorityMismatch; InvalidAuthority; InvalidRoute{reason:String}; NoRoute; InvalidForwardingInput; UnsupportedUpgrade; SerializationInvariant. Reasons are fixed lower_snake_case categories, never raw input.
+
+Limits: request line 8192 bytes, header section 32768, 128 fields, name 128, value 8192, content length/body/chunk 16777216, chunk line 1024, 16 chunk extensions, trailers 8192 bytes and 32 fields, target 8192, routes 256, forwarding value 1024, canonical head 49152. bytes_consumed includes owned terminating CRLF.
+"""
+external_references = [
+  "RFC 9110 sections 5.1-5.6, 7.1, 7.6.1, 9.3, and 15",
+  "RFC 9112 sections 2.2, 3, 3.2, 6, 6.2, 6.3, 7.1, and 9.3",
+  "RFC 7239 sections 4-7; RFC 6455 sections 4.1, 4.2.1, and 11.3",
+  "RFC 3986 sections 2.1, 2.2, 3.2, 3.3, 5.2.4, and 6.2.2.1"
+]
+
+[[function]]
+name = "parse_request_line"
+purpose = "Parse exactly one strict HTTP/1.1 request line and expose its boundary."
+signature = "pub fn parse_request_line(input: &[u8]) -> Result<RequestLine, PolyguardError>"
+inputs = ["bytes at a request-line boundary, possibly followed by headers"]
+outputs = ["canonical method, preserved target, Http11, and bytes consumed through CRLF"]
+errors = ["Incomplete", "LimitExceeded request_line_bytes", "InvalidRequestLine", "UnsupportedVersion", "InvalidMethod", "InvalidTarget"]
+requirements = [
+  "Find the first CRLF within 8192 content bytes. Without it return Incomplete until the limit; limit-plus-one is LimitExceeded. Bare LF/CR, NUL, or control is invalid with reason bare_line_ending or control_character.",
+  "Grammar is exactly method SP target SP HTTP/1.1 CRLF with one ASCII SP. Tabs, extra/leading/trailing whitespace, empty parts, or multiple spaces are invalid_spacing.",
+  "Method is 1..32 RFC 9110 token bytes, canonical lowercase; invalid or longer is InvalidMethod. Extension methods are allowed.",
+  "Target is 1..8192 visible ASCII bytes, no space/control/NUL or # fragment; preserve spelling. Invalid is non_visible_ascii or fragment_not_allowed.",
+  "Accept exactly uppercase HTTP/1.1. All other versions, including 1.0 and HTTP/2, are UnsupportedVersion; reject HTTP/0.9.",
+  "Consume through this CRLF only."
+]
+[[function.examples]]
+name = "ordinary"
+given = "`GET /a?b=1 HTTP/1.1\r\nHost: x\r\n`"
+expect = "method get, target /a?b=1, Http11, boundary before Host"
+[[function.examples]]
+name = "bare lf"
+given = "`GET / HTTP/1.1\n`"
+expect = "InvalidRequestLine bare_line_ending"
+[[function.examples]]
+name = "ambiguous whitespace"
+given = "`GET  / HTTP/1.1\r\n` or a tab separator"
+expect = "InvalidRequestLine invalid_spacing"
+[[function.examples]]
+name = "old version"
+given = "`GET / HTTP/1.0\r\n`"
+expect = "UnsupportedVersion"
+
+[[function]]
+name = "parse_header_section"
+purpose = "Parse a strict HTTP field section without merging away order or duplicates."
+signature = "pub fn parse_header_section(input: &[u8]) -> Result<HeaderBlock, PolyguardError>"
+inputs = ["bytes after request-line CRLF, possibly followed by body or next message"]
+outputs = ["ordered fields and boundary through the empty CRLF line"]
+errors = ["Incomplete", "LimitExceeded header_section_bytes/header_name_bytes/header_value_bytes", "TooManyHeaders", "InvalidHeader"]
+requirements = [
+  "Require terminating empty CRLF and consume nothing later. Incomplete within 32768 is Incomplete; larger is LimitExceeded.",
+  "Each line is token-name colon OWS value OWS CRLF. Name is 1..128 token bytes and lowercase. Whitespace before colon is whitespace_before_colon.",
+  "Value permits HTAB, SP, visible ASCII, and obs-text; trim edge SP/HTAB only, preserve interior bytes. NUL, DEL, CR/LF, and other controls are invalid_value_byte.",
+  "A line beginning SP/HTAB is obs_fold; bare CR/LF is bare_line_ending. Empty values are allowed.",
+  "Preserve order and duplicates; never comma-join. Maximum 128 fields and 8192 trimmed value bytes. Error index is byte offset in input.",
+  "Leave Host, framing, Connection, and Upgrade semantics to later functions."
+]
+[[function.examples]]
+name = "duplicates"
+given = "`Host: example.test\r\nX-A: one\r\nX-A:\ttwo \t\r\n\r\nBODY`"
+expect = "host, x-a one, x-a two in order; boundary before BODY"
+[[function.examples]]
+name = "space before colon"
+given = "`Host : x\r\n\r\n`"
+expect = "InvalidHeader whitespace_before_colon"
+[[function.examples]]
+name = "obs fold"
+given = "`X: a\r\n b\r\n\r\n`"
+expect = "InvalidHeader obs_fold"
+
+[[function]]
+name = "determine_body_framing"
+purpose = "Determine exactly one request-body interpretation from validated metadata."
+signature = "pub fn determine_body_framing(request: &RequestLine, headers: &HeaderBlock) -> Result<BodyFraming, PolyguardError>"
+inputs = ["valid request line", "valid ordered headers"]
+outputs = ["None, ContentLength, or Chunked"]
+errors = ["InvalidContentLength", "ConflictingContentLength", "InvalidTransferEncoding", "AmbiguousFraming", "LimitExceeded content_length"]
+requirements = [
+  "Parse every Content-Length field and comma member after OWS. Each is nonempty decimal digits only, no sign/inner whitespace/overflow. Empty or invalid is InvalidContentLength.",
+  "All lengths must be numerically identical; repeated `05` and `5` are accepted, differences are ConflictingContentLength. Over 16777216 is LimitExceeded.",
+  "Combine Transfer-Encoding fields in order as comma-list. Only exactly one bare case-insensitive chunked member is allowed; parameters, empty/repeated/additional/reordered codings are InvalidTransferEncoding.",
+  "Any Transfer-Encoding field plus any Content-Length field is AmbiguousFraming, including zero or invalid values; field-presence ambiguity takes precedence.",
+  "Lone valid chunked returns Chunked. Content-Length zero returns None, positive returns ContentLength. Neither returns None for every method. Never use close-delimiting for requests."
+]
+[[function.examples]]
+name = "identical lengths"
+given = "Content-Length 05 and 5"
+expect = "ContentLength(5)"
+[[function.examples]]
+name = "conflict"
+given = "Content-Length: 4, 5"
+expect = "ConflictingContentLength"
+[[function.examples]]
+name = "te cl"
+given = "Transfer-Encoding chunked and Content-Length 0"
+expect = "AmbiguousFraming"
+[[function.examples]]
+name = "unsupported coding"
+given = "Transfer-Encoding gzip, chunked"
+expect = "InvalidTransferEncoding"
+
+[[function]]
+name = "parse_chunk_metadata"
+purpose = "Parse one chunk-size line without consuming chunk data."
+signature = "pub fn parse_chunk_metadata(input: &[u8]) -> Result<ChunkMeta, PolyguardError>"
+inputs = ["bytes at a chunk-size line, possibly followed by data"]
+outputs = ["size, ordered normalized extensions, boundary through CRLF"]
+errors = ["Incomplete", "LimitExceeded chunk_line_bytes/chunk_size/chunk_extensions", "InvalidChunk"]
+requirements = [
+  "Find CRLF within 1024 content bytes; bare CR/LF/control/NUL is invalid_line_ending_or_control; consume no data.",
+  "Size is 1..16 ASCII hex digits, no sign, 0x, or whitespace. Case-insensitive; over 16777216 is LimitExceeded. Leading zeros and zero are valid.",
+  "Each extension is semicolon then 1..64 token name, optional equals token or quoted-string. Lowercase names, safely unescape quoted-pair, preserve order and duplicates.",
+  "Reject whitespace around separators, empty/invalid names, bad quote/control, junk, and over 16 extensions with fixed reasons.",
+  "bytes_consumed ends immediately after line CRLF."
+]
+[[function.examples]]
+name = "extensions"
+given = "`a;Foo=bar;x=\"a\\\"b\"\r\n0123456789`"
+expect = "size 10, foo=bar and x=a-quote-b, boundary before data"
+[[function.examples]]
+name = "bad size"
+given = "`0x10\r\n` or `+10\r\n`"
+expect = "InvalidChunk invalid_size"
+[[function.examples]]
+name = "chunk bare lf"
+given = "`a\n`"
+expect = "InvalidChunk invalid_line_ending_or_control"
+
+[[function]]
+name = "parse_trailer_section"
+purpose = "Parse and constrain trailer fields after the zero-size chunk."
+signature = "pub fn parse_trailer_section(input: &[u8], declared_names: &[String]) -> Result<TrailerBlock, PolyguardError>"
+inputs = ["bytes after the final chunk line", "lowercase names declared by Trailer"]
+outputs = ["ordered permitted fields and boundary through terminal CRLF"]
+errors = ["Incomplete", "LimitExceeded trailer_bytes", "InvalidTrailer"]
+requirements = [
+  "Use parse_header_section grammar and whitespace/bare-line rules with an 8192-byte total and 32-field maximum.",
+  "Declared names must be valid lowercase unique tokens. Every received name must be declared exactly once or undeclared_field; duplicate received names are duplicate_field.",
+  "Forbid content-length, transfer-encoding, host, connection, trailer, upgrade, forwarded, every x-forwarded-* name, authorization, proxy-authorization, cookie, and set-cookie in declarations and fields as forbidden_field.",
+  "Preserve permitted order and values. Empty trailers are valid even with declarations. Consume only through empty CRLF."
+]
+[[function.examples]]
+name = "declared trailer"
+given = "declared digest; `Digest: sha-256=x\r\n\r\nNEXT`"
+expect = "one digest field and boundary before NEXT"
+[[function.examples]]
+name = "undeclared trailer"
+given = "no declarations; `X: y\r\n\r\n`"
+expect = "InvalidTrailer undeclared_field"
+[[function.examples]]
+name = "forbidden trailer"
+given = "declared content-length"
+expect = "InvalidTrailer forbidden_field"
+
+[[function]]
+name = "normalize_request_target"
+purpose = "Classify and canonicalize a request target without hiding path ambiguity."
+signature = "pub fn normalize_request_target(request: &RequestLine) -> Result<NormalizedTarget, PolyguardError>"
+inputs = ["valid request line with preserved target spelling"]
+outputs = ["form, optional lowercase scheme/authority, canonical path-query, routing path"]
+errors = ["InvalidTarget", "InvalidAuthority", "LimitExceeded target_bytes"]
+requirements = [
+  "OPTIONS * yields Asterisk with both target strings `*`; other methods with * are asterisk_method. CONNECT requires authority-form; non-CONNECT rejects authority-form.",
+  "Origin-form begins slash. Split first question mark. Path nonempty; path and query forbid backslash, NUL, control, raw space, and fragment. Every percent escape must be exactly percent followed by two ASCII hex digits; a truncated escape or either non-hex digit is InvalidTarget invalid_percent_encoding. Uppercase hex in valid escapes.",
+  "Decode percent-encoded unreserved ASCII, never slash/backslash/percent/reserved/non-ASCII octets. Reject encoded slash/backslash/NUL/control. Apply RFC 3986 remove-dot-segments after decoding unreserved; reject traversal above root; never collapse repeated slashes.",
+  "Absolute-form accepts case-insensitive http:// or https:// only, lowercases scheme, requires authority without userinfo, and uses / for empty path. Fragment forbidden.",
+  "Authority-form is DNS-or-bracketed-IPv6 colon numeric port 1..65535, no userinfo/path/query/fragment; lowercase DNS and remove one trailing dot; lowercase IPv6 hex without otherwise rewriting.",
+  "routing_path is canonical path before question mark; / for empty absolute path; * or authority spelling for those forms. Result max 8192."
+]
+[[function.examples]]
+name = "origin normalization"
+given = "GET `/a/%7e/b/../c?x=%2f`"
+expect = "Origin `/a/~/c?x=%2F`, routing `/a/~/c`"
+[[function.examples]]
+name = "absolute"
+given = "GET `HTTP://Example.TEST:80/a`"
+expect = "Absolute http, authority example.test:80, path /a"
+[[function.examples]]
+name = "connect authority"
+given = "CONNECT `example.test:443`"
+expect = "Authority example.test:443"
+[[function.examples]]
+name = "hidden slash"
+given = "GET `/a%2fb`"
+expect = "InvalidTarget encoded_separator"
+[[function.examples]]
+name = "malformed percent escapes"
+given = "GET `/bad%`, `/bad%0`, or `/bad%GG`"
+expect = "InvalidTarget invalid_percent_encoding"
+
+[[function]]
+name = "reconcile_authority"
+purpose = "Produce one effective authority and reject Host/target disagreement."
+signature = "pub fn reconcile_authority(target: &NormalizedTarget, headers: &HeaderBlock) -> Result<EffectiveAuthority, PolyguardError>"
+inputs = ["normalized target", "validated ordered headers"]
+outputs = ["canonical host and optional port"]
+errors = ["MissingHost", "MultipleHost", "InvalidAuthority", "AuthorityMismatch"]
+requirements = [
+  "Require exactly one Host for Origin/Asterisk; zero or one for Absolute/Authority. More than one is MultipleHost even identical or comma-combined.",
+  "Host is ASCII DNS or bracketed IPv6, optional port. Reject empty/comma/whitespace/control/userinfo/path/query/fragment/zone and ambiguous unbracketed IPv6. DNS labels letters/digits/hyphen, no edge hyphen, <=63 each and 253 total; lowercase and remove one final dot. Port decimal 1..65535.",
+  "Parse target authority identically. Existing Host must equal after default-port normalization: absent equals 80 for http and 443 for https; authority-form has no default. Mismatch is AuthorityMismatch.",
+  "Prefer target authority, otherwise Host. Preserve explicit nondefault port; omit explicit default http/https port. Never use forwarding metadata."
+]
+[[function.examples]]
+name = "origin host"
+given = "Origin with Host `Example.Test.:8080`"
+expect = "example.test port 8080"
+[[function.examples]]
+name = "default agreement"
+given = "absolute http example.test:80 and Host example.test"
+expect = "example.test without port"
+[[function.examples]]
+name = "duplicate host"
+given = "two identical Host fields"
+expect = "MultipleHost"
+[[function.examples]]
+name = "authority conflict"
+given = "absolute example.test and Host evil.test"
+expect = "AuthorityMismatch"
+
+[[function]]
+name = "remove_hop_by_hop_headers"
+purpose = "Remove fixed hop-by-hop fields and fields nominated by Connection."
+signature = "pub fn remove_hop_by_hop_headers(headers: &HeaderBlock) -> Result<SanitizedHeaders, PolyguardError>"
+inputs = ["validated ordered request headers"]
+outputs = ["remaining fields in order and sorted unique removed names"]
+errors = ["InvalidHeader invalid_connection_token"]
+requirements = [
+  "Parse every Connection as comma-list of nonempty token names with OWS; lowercase. Empty or invalid is invalid_connection_token.",
+  "Remove connection, proxy-connection, keep-alive, transfer-encoding, te, trailer, upgrade, proxy-authenticate, proxy-authorization, and every nominated name, all occurrences.",
+  "Do not otherwise remove host, content-length, authorization, cookie, forwarded, or x-forwarded-*.",
+  "Retain relative order/exact values. removed_names sorted lowercase unique; include fixed names only if present and every nominated name even absent."
+]
+[[function.examples]]
+name = "dynamic removal"
+given = "Connection X-Hop, keep-alive; X-Hop secret; X-End ok"
+expect = "only x-end remains; removed connection, keep-alive, x-hop"
+[[function.examples]]
+name = "empty connection member"
+given = "Connection `close,,upgrade`"
+expect = "InvalidHeader invalid_connection_token"
+
+[[function]]
+name = "construct_canonical_upstream_head"
+purpose = "Serialize trusted typed metadata as one canonical HTTP/1.1 upstream head."
+signature = "pub fn construct_canonical_upstream_head(method: &str, target: &NormalizedTarget, authority: &EffectiveAuthority, headers: &SanitizedHeaders, framing: &BodyFraming, forwarding: &ForwardingResult) -> Result<CanonicalRequestHead, PolyguardError>"
+inputs = ["canonical method/target/authority", "sanitized fields", "unique framing", "trusted forwarding metadata"]
+outputs = ["bytes through final empty line and same framing"]
+errors = ["SerializationInvariant", "LimitExceeded canonical_head_bytes"]
+requirements = [
+  "Reject Authority/Asterisk for upstream. Emit uppercase METHOD SP origin-path-query SP HTTP/1.1 CRLF; never empty path.",
+  "Defensively discard host, content-length, transfer-encoding, connection, forwarded, and all x-forwarded-* from input. Reject any other fixed hop-by-hop survivor.",
+  "Emit one Host first, brackets around IPv6 and optional trusted port. Emit remaining fields in order as lowercase-name colon SP exact-value CRLF.",
+  "Emit exactly one Forwarded and X-Forwarded-For/Proto/Host. Emit decimal Content-Length for ContentLength, Transfer-Encoding chunked for Chunked, then Connection close and empty CRLF.",
+  "Revalidate model invariants; never emit controls/invalid tokens/authority or input credentials in errors. Max 49152 bytes.",
+  "Reparsing output gives the same method, origin target, authority, end-to-end fields, and framing."
+]
+[[function.examples]]
+name = "canonical get"
+given = "get /a, authority example.test, x-test y, no body, validated forwarding"
+expect = "GET line; Host first; x-test; four forwarding fields; Connection close; empty line"
+[[function.examples]]
+name = "host replacement"
+given = "sanitized fields unexpectedly contain two Host values"
+expect = "both discarded and exactly trusted Host emitted"
+
+[[function]]
+name = "match_route"
+purpose = "Select an upstream by exact host and longest boundary-aware path prefix."
+signature = "pub fn match_route(authority: &EffectiveAuthority, target: &NormalizedTarget, routes: &[RouteRule]) -> Result<RouteMatch, PolyguardError>"
+inputs = ["effective authority", "normalized target", "up to 256 routes"]
+outputs = ["upstream and declaration order"]
+errors = ["LimitExceeded route_count", "InvalidRoute", "NoRoute"]
+requirements = [
+  "Require Origin/Absolute routing path beginning slash. Validate rule host canonical DNS/bracketed IPv6 without port, prefix canonical absolute path, upstream 1..64 [A-Za-z0-9_.-], and unique declaration_order.",
+  "Host matches authority.host exact after lowercase; rule ignores port.",
+  "Prefix / matches all. Other prefix has no trailing slash and matches equality or when next path byte is slash; /api does not match /apix. Compare encoded reserved bytes bytewise.",
+  "Choose greatest prefix byte length, then lowest declaration_order; slice order irrelevant. Over 256 is LimitExceeded.",
+  "No match is NoRoute without echoing host/path."
+]
+[[function.examples]]
+name = "longest prefix"
+given = "example.test /api/v1/x with /, /api, /api/v1"
+expect = "/api/v1 route"
+[[function.examples]]
+name = "boundary"
+given = "path /apix and prefix /api only"
+expect = "NoRoute"
+[[function.examples]]
+name = "tie"
+given = "equivalent matching rules orders 9 and 2"
+expect = "order 2"
+
+[[function]]
+name = "apply_forwarding_policy"
+purpose = "Replace or extend forwarding metadata at an explicit trusted-proxy boundary."
+signature = "pub fn apply_forwarding_policy(policy: &ForwardingPolicy, headers: &HeaderBlock) -> Result<ForwardingResult, PolyguardError>"
+inputs = ["connection-derived client IP/protocol/host and trust flag", "incoming headers"]
+outputs = ["canonical Forwarded and X-Forwarded values"]
+errors = ["InvalidForwardingInput", "LimitExceeded forwarding_value_bytes"]
+requirements = [
+  "Validate canonical IPv4 or bracket-free IPv6 without zone, proto exactly http/https lowercase, and valid authority host. Values come from listener.",
+  "If trust false, ignore incoming forwarding and create one hop: Forwarded for=IPv4 or quoted bracketed IPv6; proto; quoted escaped host. X values are client IP, proto, host.",
+  "If trust true, allow at most one of each Forwarded and X-Forwarded-* field. Reject controls, non-ASCII, empty comma members, duplicate fields, or values over 1024. Append comma SP and new canonical value; missing starts fresh.",
+  "Do not semantically endorse trusted old hops beyond safe syntax. Every output <=1024 and has no client port/user identifier/content."
+]
+[[function.examples]]
+name = "untrusted replacement"
+given = "trust false, client 192.0.2.1, https, example.test, spoofed forwarding"
+expect = "only supplied hop/proto/host"
+[[function.examples]]
+name = "trusted append"
+given = "trust true, XFF 198.51.100.2, client 192.0.2.1"
+expect = "XFF `198.51.100.2, 192.0.2.1`"
+[[function.examples]]
+name = "duplicate input"
+given = "trust true and two Forwarded fields"
+expect = "InvalidForwardingInput"
+
+[[function]]
+name = "decide_upgrade"
+purpose = "Reject unsafe upgrades and recognize only a complete WebSocket handshake."
+signature = "pub fn decide_upgrade(request: &RequestLine, headers: &HeaderBlock, framing: &BodyFraming) -> Result<UpgradeDecision, PolyguardError>"
+inputs = ["valid request line/headers/framing"]
+outputs = ["None without intent, WebSocket when valid, Reject only as typed value when policy uses it"]
+errors = ["UnsupportedUpgrade", "AmbiguousFraming"]
+requirements = [
+  "Intent exists if Upgrade field or Connection token upgrade exists. Neither returns None; only one side is UnsupportedUpgrade.",
+  "Require method get, origin/absolute target, and BodyFraming None. Any body or ambiguous framing rejects.",
+  "Require exactly one Upgrade equal websocket case-insensitive; one Sec-WebSocket-Version 13; one canonical-base64 key decoding to 16 bytes; Connection token upgrade. Duplicates reject.",
+  "Reject Sec-WebSocket-Extensions and any Transfer-Encoding or Content-Length field including zero. Sec-WebSocket-Protocol may occur once as unique nonempty token comma-list.",
+  "Only complete handshake returns WebSocket; other protocols never approximated. Network configuration may still disable tunneling."
+]
+[[function.examples]]
+name = "no intent"
+given = "ordinary GET"
+expect = "None"
+[[function.examples]]
+name = "websocket"
+given = "GET; Connection keep-alive, Upgrade; Upgrade websocket; Version 13; Key dGhlIHNhbXBsZSBub25jZQ==; no body"
+expect = "WebSocket"
+[[function.examples]]
+name = "h2c"
+given = "Connection Upgrade; Upgrade h2c"
+expect = "UnsupportedUpgrade"
+[[function.examples]]
+name = "zero body header"
+given = "otherwise valid handshake with Content-Length 0"
+expect = "UnsupportedUpgrade"
+
+[[function]]
+name = "classify_telemetry_outcome"
+purpose = "Map internal results to fixed privacy-safe operational telemetry."
+signature = "pub fn classify_telemetry_outcome(code: &str, upstream_reached: bool) -> Result<TelemetryOutcome, PolyguardError>"
+inputs = ["fixed internal code", "whether upstream request bytes were written"]
+outputs = ["fixed category and success bit with no user data"]
+errors = ["SerializationInvariant for unknown/contradictory input"]
+requirements = [
+  "Accept exactly accepted, client_syntax, ambiguous_framing, policy_rejected, route_missing, upstream_failure, timeout, implementation_disagreement, internal_failure and map one-to-one. Success only for accepted.",
+  "accepted/upstream_failure/timeout/internal_failure allow either upstream flag. client_syntax, ambiguous_framing, policy_rejected, route_missing, and implementation_disagreement require false or SerializationInvariant.",
+  "Never copy/hash/truncate/derive data from target, headers, body, credential, cookie, IP, host, route, response, or error text. Unknown strings reject.",
+  "Output contains only fixed enum/boolean and stays stable across 0.1.x."
+]
+[[function.examples]]
+name = "accepted outcome"
+given = "accepted, upstream true"
+expect = "Accepted success true"
+[[function.examples]]
+name = "disagreement outcome"
+given = "implementation_disagreement, upstream false"
+expect = "ImplementationDisagreement success false"
+[[function.examples]]
+name = "contradiction"
+given = "ambiguous_framing, upstream true"
+expect = "SerializationInvariant"
+[[function.examples]]
+name = "unknown outcome"
+given = "unlisted or content-derived string"
+expect = "SerializationInvariant"
