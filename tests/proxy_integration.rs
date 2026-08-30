@@ -3,13 +3,18 @@ use std::io::{Read, Write};
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
-use std::sync::mpsc;
+use std::sync::{Arc, mpsc};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+use rcgen::{CertifiedKey, generate_simple_self_signed};
+use rustls::pki_types::ServerName;
+use rustls::{ClientConfig, ClientConnection, RootCertStore, StreamOwned};
 
 struct ProxyProcess {
     child: Child,
     directory: PathBuf,
+    management: SocketAddr,
 }
 
 impl Drop for ProxyProcess {
@@ -26,6 +31,48 @@ fn free_address() -> SocketAddr {
 }
 
 fn start_proxy(proxy: SocketAddr, upstream: SocketAddr, max_body: usize) -> ProxyProcess {
+    start_proxy_with_budget(
+        proxy,
+        upstream,
+        max_body,
+        max_body.saturating_add(1_048_576),
+    )
+}
+
+fn start_proxy_with_budget(
+    proxy: SocketAddr,
+    upstream: SocketAddr,
+    max_body: usize,
+    max_inflight_body: usize,
+) -> ProxyProcess {
+    start_proxy_with_budget_and_timeout(proxy, upstream, max_body, max_inflight_body, 1_000)
+}
+
+fn start_proxy_with_budget_and_timeout(
+    proxy: SocketAddr,
+    upstream: SocketAddr,
+    max_body: usize,
+    max_inflight_body: usize,
+    body_timeout_ms: u64,
+) -> ProxyProcess {
+    start_proxy_with_options(
+        proxy,
+        upstream,
+        max_body,
+        max_inflight_body,
+        body_timeout_ms,
+        None,
+    )
+}
+
+fn start_proxy_with_options(
+    proxy: SocketAddr,
+    upstream: SocketAddr,
+    max_body: usize,
+    max_inflight_body: usize,
+    body_timeout_ms: u64,
+    tls_pem: Option<(&str, &str)>,
+) -> ProxyProcess {
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
@@ -36,6 +83,19 @@ fn start_proxy(proxy: SocketAddr, upstream: SocketAddr, max_body: usize) -> Prox
         proxy.port()
     ));
     fs::create_dir(&directory).unwrap();
+    let management = free_address();
+    let tls_section = if let Some((certificate, private_key)) = tls_pem {
+        let certificate_path = directory.join("certificate.pem");
+        let private_key_path = directory.join("private-key.pem");
+        fs::write(&certificate_path, certificate).unwrap();
+        fs::write(&private_key_path, private_key).unwrap();
+        format!(
+            "[listener.tls]\ncertificate_chain_file = {:?}\nprivate_key_file = {:?}\n",
+            certificate_path, private_key_path
+        )
+    } else {
+        String::new()
+    };
     let config = directory.join("polyguard.toml");
     fs::write(
         &config,
@@ -43,19 +103,23 @@ fn start_proxy(proxy: SocketAddr, upstream: SocketAddr, max_body: usize) -> Prox
             r#"
 [listener]
 address = "{proxy}"
+management_address = "{management}"
 security_mode = "agreement"
 agreement_implementations = 3
 max_connections = 16
 request_header_timeout_ms = 1000
-request_body_timeout_ms = 1000
+request_body_timeout_ms = {body_timeout_ms}
 upstream_connect_timeout_ms = 1000
 upstream_response_timeout_ms = 1000
 graceful_shutdown_timeout_ms = 1000
+
+{tls_section}
 
 [limits]
 max_request_body_bytes = {max_body}
 max_response_header_bytes = 8192
 max_response_body_bytes = 1048576
+max_inflight_body_bytes = {max_inflight_body}
 
 [[upstreams]]
 name = "app"
@@ -83,7 +147,88 @@ upstream = "app"
         assert!(Instant::now() < deadline, "proxy did not start");
         thread::sleep(Duration::from_millis(10));
     }
-    ProxyProcess { child, directory }
+    ProxyProcess {
+        child,
+        directory,
+        management,
+    }
+}
+
+#[test]
+fn aggregate_body_memory_limit_rejects_overload_and_recovers() {
+    let upstream = TcpListener::bind("127.0.0.1:0").unwrap();
+    let upstream_address = upstream.local_addr().unwrap();
+    let proxy_address = free_address();
+    let proxy = start_proxy_with_budget_and_timeout(proxy_address, upstream_address, 4, 4, 5_000);
+
+    let mut holding = TcpStream::connect(proxy_address).unwrap();
+    holding
+        .write_all(
+            b"POST /hold HTTP/1.1\r\nHost: example.test\r\nTransfer-Encoding: chunked\r\n\r\n4\r\nx",
+        )
+        .unwrap();
+    holding
+        .set_read_timeout(Some(Duration::from_millis(100)))
+        .unwrap();
+    let mut early = [0_u8; 256];
+    if let Ok(count) = holding.read(&mut early) {
+        panic!("holding request ended early: {:?}", &early[..count]);
+    }
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let metrics = send(
+            proxy.management,
+            b"GET /_polyguard/metrics HTTP/1.1\r\nHost: example.test\r\n\r\n",
+        );
+        let last_metrics = String::from_utf8_lossy(&metrics);
+        if last_metrics.contains("polyguard_inflight_body_bytes 4\n") {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "holding request did not reserve memory: {last_metrics}"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+    let saturated_readiness = send(
+        proxy.management,
+        b"GET /_polyguard/ready HTTP/1.1\r\nHost: localhost\r\n\r\n",
+    );
+    assert!(
+        saturated_readiness.starts_with(b"HTTP/1.1 503"),
+        "{saturated_readiness:?}"
+    );
+
+    let overloaded = send(
+        proxy_address,
+        b"POST /second HTTP/1.1\r\nHost: example.test\r\nContent-Length: 1\r\n\r\ny",
+    );
+    assert!(overloaded.starts_with(b"HTTP/1.1 503"), "{overloaded:?}");
+    drop(holding);
+    thread::sleep(Duration::from_millis(100));
+
+    let server = thread::spawn(move || {
+        let (mut stream, _) = upstream.accept().unwrap();
+        let request = read_request(&mut stream);
+        assert!(request.ends_with(b"\r\n\r\nbody"));
+        stream
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+            .unwrap();
+    });
+    let recovered = send(
+        proxy_address,
+        b"POST /recovered HTTP/1.1\r\nHost: example.test\r\nContent-Length: 4\r\n\r\nbody",
+    );
+    assert!(recovered.starts_with(b"HTTP/1.1 200 OK"), "{recovered:?}");
+    server.join().unwrap();
+    let recovered_readiness = send(
+        proxy.management,
+        b"GET /_polyguard/ready HTTP/1.1\r\nHost: localhost\r\n\r\n",
+    );
+    assert!(
+        recovered_readiness.starts_with(b"HTTP/1.1 200 OK"),
+        "{recovered_readiness:?}"
+    );
 }
 
 fn send(address: SocketAddr, wire: &[u8]) -> Vec<u8> {
@@ -96,6 +241,64 @@ fn send(address: SocketAddr, wire: &[u8]) -> Vec<u8> {
     let mut response = Vec::new();
     stream.read_to_end(&mut response).unwrap();
     response
+}
+
+#[test]
+fn native_tls_proxies_https_and_marks_forwarding_metadata() {
+    let CertifiedKey { cert, signing_key } =
+        generate_simple_self_signed(vec!["example.test".into()]).unwrap();
+    let upstream = TcpListener::bind("127.0.0.1:0").unwrap();
+    let upstream_address = upstream.local_addr().unwrap();
+    let proxy_address = free_address();
+    let _proxy = start_proxy_with_options(
+        proxy_address,
+        upstream_address,
+        1_024,
+        1_048_576,
+        1_000,
+        Some((&cert.pem(), &signing_key.serialize_pem())),
+    );
+    let (request_tx, request_rx) = mpsc::channel();
+    let server = thread::spawn(move || {
+        let (mut stream, _) = upstream.accept().unwrap();
+        request_tx.send(read_request(&mut stream)).unwrap();
+        stream
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 6\r\n\r\nsecure")
+            .unwrap();
+    });
+
+    let mut roots = RootCertStore::empty();
+    roots.add(cert.der().clone()).unwrap();
+    let mut client_config = ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    client_config.alpn_protocols = vec![b"http/1.1".to_vec()];
+    let connection = ClientConnection::new(
+        Arc::new(client_config),
+        ServerName::try_from("example.test").unwrap().to_owned(),
+    )
+    .unwrap();
+    let socket = TcpStream::connect(proxy_address).unwrap();
+    socket
+        .set_read_timeout(Some(Duration::from_secs(3)))
+        .unwrap();
+    let mut tls = StreamOwned::new(connection, socket);
+    tls.write_all(b"GET /secure HTTP/1.1\r\nHost: example.test\r\n\r\n")
+        .unwrap();
+    let mut response = Vec::new();
+    tls.read_to_end(&mut response).unwrap();
+    assert!(response.starts_with(b"HTTP/1.1 200 OK"), "{response:?}");
+    assert!(response.ends_with(b"\r\n\r\nsecure"), "{response:?}");
+    assert_eq!(tls.conn.alpn_protocol(), Some(b"http/1.1".as_slice()));
+
+    let request = request_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    let request = String::from_utf8_lossy(&request).to_ascii_lowercase();
+    assert!(
+        request.contains("forwarded: for=127.0.0.1;proto=https"),
+        "{request}"
+    );
+    assert!(request.contains("x-forwarded-proto: https"), "{request}");
+    server.join().unwrap();
 }
 
 fn read_request(stream: &mut TcpStream) -> Vec<u8> {
@@ -198,15 +401,23 @@ fn chunked_request_is_fully_validated_then_forwarded_with_one_length() {
 fn health_metrics_and_body_limit_are_operational() {
     let upstream = TcpListener::bind("127.0.0.1:0").unwrap();
     let proxy_address = free_address();
-    let _proxy = start_proxy(proxy_address, upstream.local_addr().unwrap(), 4);
+    let proxy = start_proxy(proxy_address, upstream.local_addr().unwrap(), 4);
     let health = send(
-        proxy_address,
+        proxy.management,
         b"GET /_polyguard/health HTTP/1.1\r\nHost: example.test\r\n\r\n",
     );
     assert!(health.starts_with(b"HTTP/1.1 200 OK"));
     assert!(health.ends_with(b"\r\n\r\nok\n"));
-    let metrics = send(
+    let public_health = send(
         proxy_address,
+        b"GET /_polyguard/health HTTP/1.1\r\nHost: management.invalid\r\n\r\n",
+    );
+    assert!(
+        public_health.starts_with(b"HTTP/1.1 404"),
+        "management endpoint leaked onto traffic listener: {public_health:?}"
+    );
+    let metrics = send(
+        proxy.management,
         b"GET /_polyguard/metrics HTTP/1.1\r\nHost: example.test\r\n\r\n",
     );
     assert!(String::from_utf8_lossy(&metrics).contains("polyguard_disagreements_total"));

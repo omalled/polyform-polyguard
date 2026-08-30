@@ -9,10 +9,13 @@ use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::path::Path;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::mpsc::{SyncSender, TrySendError, sync_channel};
 use std::sync::{Arc, Mutex, RwLock};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use rustls::pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject};
+use rustls::{ServerConfig, ServerConnection, StreamOwned};
 use serde::Deserialize;
 use serde_json::json;
 
@@ -29,7 +32,8 @@ use crate::{
 const MAX_REQUEST_LINE_BYTES: usize = 8_192;
 const MAX_REQUEST_HEADER_BYTES: usize = 32_768;
 const MAX_TRAILER_BYTES: usize = 8_192;
-const SERVER_HEADER: &[u8] = b"server: polyguard/0.1.2\r\n";
+const SERVER_HEADER: &[u8] =
+    concat!("server: polyguard/", env!("CARGO_PKG_VERSION"), "\r\n").as_bytes();
 
 static TERMINATE: AtomicBool = AtomicBool::new(false);
 
@@ -68,6 +72,10 @@ pub struct PolyformConfig {
 pub struct ListenerConfig {
     pub address: String,
     #[serde(default)]
+    pub management_address: Option<String>,
+    #[serde(default)]
+    pub tls: Option<TlsConfig>,
+    #[serde(default)]
     pub trust_forwarding_headers: bool,
     #[serde(default = "default_security_mode")]
     pub security_mode: String,
@@ -91,6 +99,13 @@ pub struct ListenerConfig {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct TlsConfig {
+    pub certificate_chain_file: String,
+    pub private_key_file: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct UpstreamConfig {
     pub name: String,
     pub address: String,
@@ -110,6 +125,7 @@ pub struct Limits {
     pub max_request_body_bytes: usize,
     pub max_response_header_bytes: usize,
     pub max_response_body_bytes: usize,
+    pub max_inflight_body_bytes: usize,
 }
 
 impl Default for Limits {
@@ -118,6 +134,7 @@ impl Default for Limits {
             max_request_body_bytes: 16 * 1024 * 1024,
             max_response_header_bytes: 32 * 1024,
             max_response_body_bytes: 64 * 1024 * 1024,
+            max_inflight_body_bytes: 128 * 1024 * 1024,
         }
     }
 }
@@ -129,7 +146,7 @@ fn default_agreement_width() -> usize {
     2
 }
 fn default_max_connections() -> usize {
-    1_024
+    128
 }
 fn default_header_timeout() -> u64 {
     5_000
@@ -183,26 +200,55 @@ pub fn load_config(path: &Path) -> std::result::Result<Config, ConfigError> {
     let source = fs::read_to_string(path).map_err(ConfigError::Io)?;
     let config: Config = toml::from_str(&source).map_err(ConfigError::Toml)?;
     validate_config(&config)?;
+    load_tls_config(config.listener.tls.as_ref()).map_err(|error| {
+        ConfigError::Invalid(format!(
+            "listener.tls certificate/key validation failed: {error}"
+        ))
+    })?;
     Ok(config)
 }
 
 pub fn validate_config(config: &Config) -> std::result::Result<(), ConfigError> {
-    SocketAddr::from_str(&config.listener.address).map_err(|_| {
+    let listener_address = SocketAddr::from_str(&config.listener.address).map_err(|_| {
         ConfigError::Invalid("listener.address must be a literal socket address".into())
     })?;
+    if let Some(address) = &config.listener.management_address {
+        let management_address = SocketAddr::from_str(address).map_err(|_| {
+            ConfigError::Invalid(
+                "listener.management_address must be a literal socket address".into(),
+            )
+        })?;
+        if management_address == listener_address {
+            return Err(ConfigError::Invalid(
+                "listener.management_address must differ from the traffic listener".into(),
+            ));
+        }
+    }
     if config.listener.security_mode != "agreement" {
         return Err(ConfigError::Invalid(
             "listener.security_mode must be agreement".into(),
         ));
+    }
+    if let Some(tls) = &config.listener.tls {
+        if tls.certificate_chain_file.trim().is_empty() || tls.private_key_file.trim().is_empty() {
+            return Err(ConfigError::Invalid(
+                "listener.tls certificate and private-key paths must not be empty".into(),
+            ));
+        }
+        if tls.certificate_chain_file == tls.private_key_file {
+            return Err(ConfigError::Invalid(
+                "listener.tls certificate and private key must be separate files".into(),
+            ));
+        }
     }
     if !(2..=5).contains(&config.listener.agreement_implementations) {
         return Err(ConfigError::Invalid(
             "listener.agreement_implementations must be between 2 and 5".into(),
         ));
     }
-    if config.listener.max_connections == 0 || config.listener.max_connections > 65_536 {
+    if config.listener.max_connections == 0 || config.listener.max_connections > 1_024 {
         return Err(ConfigError::Invalid(
-            "listener.max_connections must be 1..=65536".into(),
+            "listener.max_connections must be 1..=1024".into(),
         ));
     }
     for (name, value) in [
@@ -236,9 +282,10 @@ pub fn validate_config(config: &Config) -> std::result::Result<(), ConfigError> 
     if config.limits.max_request_body_bytes == 0
         || config.limits.max_response_header_bytes < 1_024
         || config.limits.max_response_body_bytes == 0
+        || config.limits.max_inflight_body_bytes == 0
     {
         return Err(ConfigError::Invalid(
-            "body limits must be positive and response headers at least 1024 bytes".into(),
+            "body limits, including the aggregate in-flight limit, must be positive and response headers at least 1024 bytes".into(),
         ));
     }
     let registry_ids: BTreeSet<_> = registered_implementations()
@@ -369,6 +416,7 @@ enum Fault {
     Timeout,
     UpstreamTimeout,
     TooLarge,
+    Busy,
     ClientIo,
     Upstream,
     Internal,
@@ -387,6 +435,7 @@ impl Fault {
                 PolyguardError::UnsupportedUpgrade | PolyguardError::UnsupportedVersion,
             ) => "policy_rejected",
             Self::Protocol(_) | Self::ClientIo | Self::TooLarge => "client_syntax",
+            Self::Busy => "overloaded",
             Self::Disagreement { .. } => "implementation_disagreement",
             Self::Timeout | Self::UpstreamTimeout => "timeout",
             Self::Upstream => "upstream_failure",
@@ -403,6 +452,7 @@ impl Fault {
             Self::TooLarge | Self::Protocol(PolyguardError::LimitExceeded { .. }) => {
                 (413, "Content Too Large")
             }
+            Self::Busy => (503, "Service Unavailable"),
             Self::Upstream => (502, "Bad Gateway"),
             Self::Internal => (500, "Internal Server Error"),
             _ => (400, "Bad Request"),
@@ -599,7 +649,162 @@ struct Metrics {
     disagreements: AtomicU64,
     upstream_failures: AtomicU64,
     timeouts: AtomicU64,
+    telemetry_dropped: AtomicU64,
     active: AtomicUsize,
+}
+
+struct MemoryBudget {
+    used: AtomicUsize,
+    limit: usize,
+}
+
+impl MemoryBudget {
+    fn new(limit: usize) -> Arc<Self> {
+        Arc::new(Self {
+            used: AtomicUsize::new(0),
+            limit,
+        })
+    }
+
+    fn reserve(self: &Arc<Self>, bytes: usize) -> std::result::Result<MemoryPermit, Fault> {
+        let mut current = self.used.load(Ordering::Relaxed);
+        loop {
+            let next = current.checked_add(bytes).ok_or(Fault::Busy)?;
+            if next > self.limit {
+                return Err(Fault::Busy);
+            }
+            match self.used.compare_exchange_weak(
+                current,
+                next,
+                Ordering::AcqRel,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => {
+                    return Ok(MemoryPermit {
+                        budget: Arc::clone(self),
+                        bytes,
+                    });
+                }
+                Err(observed) => current = observed,
+            }
+        }
+    }
+}
+
+struct MemoryPermit {
+    budget: Arc<MemoryBudget>,
+    bytes: usize,
+}
+
+impl MemoryPermit {
+    fn grow(&mut self, bytes: usize) -> std::result::Result<(), Fault> {
+        let mut additional = self.budget.reserve(bytes)?;
+        self.bytes = self.bytes.checked_add(bytes).ok_or(Fault::Busy)?;
+        additional.bytes = 0;
+        Ok(())
+    }
+}
+
+impl Drop for MemoryPermit {
+    fn drop(&mut self) {
+        self.budget.used.fetch_sub(self.bytes, Ordering::AcqRel);
+    }
+}
+
+struct BufferedBody {
+    bytes: Vec<u8>,
+    _permit: MemoryPermit,
+}
+
+enum ClientStream {
+    Plain(TcpStream),
+    Tls(Box<StreamOwned<ServerConnection, TcpStream>>),
+}
+
+impl ClientStream {
+    fn new(stream: TcpStream, tls: Option<Arc<ServerConfig>>) -> io::Result<Self> {
+        match tls {
+            Some(config) => Ok(Self::Tls(Box::new(StreamOwned::new(
+                ServerConnection::new(config).map_err(io::Error::other)?,
+                stream,
+            )))),
+            None => Ok(Self::Plain(stream)),
+        }
+    }
+
+    fn socket(&self) -> &TcpStream {
+        match self {
+            Self::Plain(stream) => stream,
+            Self::Tls(stream) => &stream.sock,
+        }
+    }
+
+    fn set_read_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
+        self.socket().set_read_timeout(timeout)
+    }
+
+    fn set_write_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
+        self.socket().set_write_timeout(timeout)
+    }
+
+    fn shutdown(&mut self, how: Shutdown) -> io::Result<()> {
+        if let Self::Tls(stream) = self
+            && matches!(how, Shutdown::Write | Shutdown::Both)
+        {
+            stream.conn.send_close_notify();
+            stream.flush()?;
+        }
+        self.socket().shutdown(how)
+    }
+}
+
+impl Read for ClientStream {
+    fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
+        match self {
+            Self::Plain(stream) => stream.read(output),
+            Self::Tls(stream) => stream.read(output),
+        }
+    }
+}
+
+impl Write for ClientStream {
+    fn write(&mut self, input: &[u8]) -> io::Result<usize> {
+        match self {
+            Self::Plain(stream) => stream.write(input),
+            Self::Tls(stream) => stream.write(input),
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        match self {
+            Self::Plain(stream) => stream.flush(),
+            Self::Tls(stream) => stream.flush(),
+        }
+    }
+}
+
+fn load_tls_config(settings: Option<&TlsConfig>) -> io::Result<Option<Arc<ServerConfig>>> {
+    let Some(settings) = settings else {
+        return Ok(None);
+    };
+    let certificates = CertificateDer::pem_file_iter(&settings.certificate_chain_file)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    if certificates.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "TLS certificate chain contained no certificates",
+        ));
+    }
+    let private_key = PrivateKeyDer::from_pem_file(&settings.private_key_file)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    let mut config = ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(certificates, private_key)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    config.alpn_protocols = vec![b"http/1.1".to_vec()];
+    Ok(Some(Arc::new(config)))
 }
 
 impl Metrics {
@@ -610,6 +815,7 @@ impl Metrics {
             disagreements: AtomicU64::new(0),
             upstream_failures: AtomicU64::new(0),
             timeouts: AtomicU64::new(0),
+            telemetry_dropped: AtomicU64::new(0),
             active: AtomicUsize::new(0),
         }
     }
@@ -621,18 +827,37 @@ struct Runtime {
     upstreams: BTreeMap<String, SocketAddr>,
     routes: Vec<RouteRule>,
     metrics: Metrics,
+    body_memory: Arc<MemoryBudget>,
+    tls: Option<Arc<ServerConfig>>,
     polyform: Option<RuntimePolyform>,
 }
 
 struct RuntimePolyform {
-    client: Mutex<PolyformClient>,
+    client: Arc<Mutex<PolyformClient>>,
     refresh_interval: Duration,
     report_telemetry: bool,
+    telemetry_tx: SyncSender<TelemetryReport>,
+    refresh_in_progress: AtomicBool,
+}
+
+struct TelemetryReport {
+    success: bool,
+    duration_ms: f64,
+    outcome: String,
+    calls: Vec<CallTelemetry>,
 }
 
 pub fn run(config: Config) -> io::Result<()> {
     validate_config(&config).map_err(io::Error::other)?;
+    let tls = load_tls_config(config.listener.tls.as_ref())?;
     let listen_address: SocketAddr = config.listener.address.parse().expect("validated");
+    let management_address = config
+        .listener
+        .management_address
+        .as_deref()
+        .map(str::parse::<SocketAddr>)
+        .transpose()
+        .expect("validated");
     let quarantined: BTreeSet<&String> =
         config.listener.quarantined_implementations.iter().collect();
     let polyform = initialize_polyform(&config)?;
@@ -674,21 +899,36 @@ pub fn run(config: Config) -> io::Result<()> {
     let routes = route_rules(&config);
     let shutdown_timeout = Duration::from_millis(config.listener.graceful_shutdown_timeout_ms);
     let max_connections = config.listener.max_connections;
+    let body_memory = MemoryBudget::new(config.limits.max_inflight_body_bytes);
     let runtime = Arc::new(Runtime {
         config,
         agreement,
         upstreams,
         routes,
         metrics: Metrics::new(),
+        body_memory,
+        tls,
         polyform,
     });
     install_signal_handlers();
     TERMINATE.store(false, Ordering::SeqCst);
     let listener = TcpListener::bind(listen_address)?;
     listener.set_nonblocking(true)?;
+    let management_listener = management_address.map(TcpListener::bind).transpose()?;
+    if let Some(listener) = &management_listener {
+        listener.set_nonblocking(true)?;
+    }
     log_json(
-        json!({"event":"started","address":listen_address.to_string(),"security_mode":"agreement","selected":selected}),
+        json!({"event":"started","address":listen_address.to_string(),"transport":if runtime.tls.is_some() {"https"} else {"http"},"security_mode":"agreement","selected":selected}),
     );
+    let management_thread = management_listener
+        .map(|listener| {
+            let runtime = Arc::clone(&runtime);
+            thread::Builder::new()
+                .name("polyguard-management".into())
+                .spawn(move || run_management_listener(listener, runtime))
+        })
+        .transpose()?;
 
     let mut next_refresh = runtime
         .polyform
@@ -696,7 +936,7 @@ pub fn run(config: Config) -> io::Result<()> {
         .map(|polyform| Instant::now() + polyform.refresh_interval);
     while !TERMINATE.load(Ordering::SeqCst) {
         if next_refresh.is_some_and(|deadline| Instant::now() >= deadline) {
-            refresh_polyform(&runtime);
+            schedule_polyform_refresh(&runtime);
             next_refresh = runtime
                 .polyform
                 .as_ref()
@@ -704,19 +944,36 @@ pub fn run(config: Config) -> io::Result<()> {
         }
         match listener.accept() {
             Ok((mut stream, peer)) => {
+                if stream.set_nonblocking(false).is_err() {
+                    let _ = stream.shutdown(Shutdown::Both);
+                    continue;
+                }
                 if runtime.metrics.active.fetch_add(1, Ordering::SeqCst) >= max_connections {
                     runtime.metrics.active.fetch_sub(1, Ordering::SeqCst);
-                    let _ = write_simple_response(
-                        &mut stream,
-                        503,
-                        "Service Unavailable",
-                        b"busy\n",
-                        &[],
-                    );
+                    if runtime.tls.is_none() {
+                        let _ = write_simple_response(
+                            &mut stream,
+                            503,
+                            "Service Unavailable",
+                            b"busy\n",
+                            &[],
+                        );
+                    } else {
+                        let _ = stream.shutdown(Shutdown::Both);
+                    }
                     continue;
                 }
                 let shared = Arc::clone(&runtime);
-                thread::spawn(move || {
+                let spawn_failure = Arc::clone(&runtime);
+                if thread::Builder::new().name("polyguard-request".into()).spawn(move || {
+                    let mut stream = match ClientStream::new(stream, shared.tls.clone()) {
+                        Ok(stream) => stream,
+                        Err(_) => {
+                            shared.metrics.rejected.fetch_add(1, Ordering::Relaxed);
+                            shared.metrics.active.fetch_sub(1, Ordering::SeqCst);
+                            return;
+                        }
+                    };
                     begin_trace();
                     let started = Instant::now();
                     let result = handle_connection(&mut stream, peer, &shared);
@@ -757,7 +1014,11 @@ pub fn run(config: Config) -> io::Result<()> {
                         json!({"event":"request","outcome":code,"disagreement_function":function,"latency_ms":started.elapsed().as_millis()}),
                     );
                     shared.metrics.active.fetch_sub(1, Ordering::SeqCst);
-                });
+                }).is_err() {
+                    spawn_failure.metrics.rejected.fetch_add(1, Ordering::Relaxed);
+                    spawn_failure.metrics.active.fetch_sub(1, Ordering::SeqCst);
+                    log_json(json!({"event":"request_worker","status":"spawn_failed"}));
+                }
             }
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
                 thread::sleep(Duration::from_millis(10))
@@ -770,6 +1031,9 @@ pub fn run(config: Config) -> io::Result<()> {
     let deadline = Instant::now() + shutdown_timeout;
     while runtime.metrics.active.load(Ordering::SeqCst) != 0 && Instant::now() < deadline {
         thread::sleep(Duration::from_millis(10));
+    }
+    if let Some(thread) = management_thread {
+        let _ = thread.join();
     }
     log_json(
         json!({"event":"stopped","active_connections":runtime.metrics.active.load(Ordering::Relaxed)}),
@@ -838,18 +1102,46 @@ fn initialize_polyform(config: &Config) -> io::Result<Option<RuntimePolyform>> {
             fs::create_dir_all(parent)
                 .map_err(|error| polyform_runtime::RuntimeError::State(error.to_string()))?;
         }
-        let client = PolyformClient::register(
+        let client = Arc::new(Mutex::new(PolyformClient::register(
             &settings.base_url,
             settings.installation_id.as_deref(),
             &settings.strategy,
             trust,
             implementation_inventory(),
             state_path,
-        )?;
+        )?));
+        let (telemetry_tx, telemetry_rx) = sync_channel::<TelemetryReport>(1_024);
+        let telemetry_client = Arc::clone(&client);
+        thread::Builder::new()
+            .name("polyguard-telemetry".into())
+            .spawn(move || {
+                while let Ok(report) = telemetry_rx.recv() {
+                    let client = telemetry_client.lock().expect("runtime lock poisoned");
+                    let active_calls = active_composition_calls(
+                        &report.calls,
+                        &client.composition.implementations,
+                    );
+                    if client
+                        .report_execution(
+                            "proxy_request",
+                            report.success,
+                            report.duration_ms,
+                            (!report.success).then_some(report.outcome.as_str()),
+                            &active_calls,
+                        )
+                        .is_err()
+                    {
+                        log_json(json!({"event":"polyform_telemetry","status":"failed"}));
+                    }
+                }
+            })
+            .map_err(|error| polyform_runtime::RuntimeError::State(error.to_string()))?;
         Ok(RuntimePolyform {
-            client: Mutex::new(client),
+            client,
             refresh_interval: Duration::from_secs(settings.refresh_interval_seconds),
             report_telemetry: settings.report_telemetry,
+            telemetry_tx,
+            refresh_in_progress: AtomicBool::new(false),
         })
     };
     match attempt() {
@@ -866,6 +1158,28 @@ fn initialize_polyform(config: &Config) -> io::Result<Option<RuntimePolyform>> {
             );
             Ok(None)
         }
+    }
+}
+
+fn schedule_polyform_refresh(runtime: &Arc<Runtime>) {
+    let Some(polyform) = &runtime.polyform else {
+        return;
+    };
+    if polyform
+        .refresh_in_progress
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
+        .is_err()
+    {
+        return;
+    }
+    let refresh_runtime = Arc::clone(runtime);
+    if thread::Builder::new()
+        .name("polyguard-composition-refresh".into())
+        .spawn(move || refresh_polyform(&refresh_runtime))
+        .is_err()
+        && let Some(polyform) = &runtime.polyform
+    {
+        polyform.refresh_in_progress.store(false, Ordering::Release);
     }
 }
 
@@ -894,6 +1208,7 @@ fn refresh_polyform(runtime: &Runtime) {
             json!({"event":"polyform_refresh","status":"failed","composition_retained":true}),
         ),
     }
+    polyform.refresh_in_progress.store(false, Ordering::Release);
 }
 
 fn report_polyform(
@@ -909,24 +1224,127 @@ fn report_polyform(
     if !polyform.report_telemetry {
         return;
     }
-    let client = polyform.client.lock().expect("runtime lock poisoned");
-    let active_calls = active_composition_calls(calls, &client.composition.implementations);
-    if client
-        .report_execution(
-            "proxy_request",
-            success,
-            duration_ms,
-            (!success).then_some(outcome),
-            &active_calls,
-        )
-        .is_err()
-    {
-        log_json(json!({"event":"polyform_telemetry","status":"failed"}));
+    let report = TelemetryReport {
+        success,
+        duration_ms,
+        outcome: outcome.into(),
+        calls: calls.to_vec(),
+    };
+    if let Err(error) = polyform.telemetry_tx.try_send(report) {
+        runtime
+            .metrics
+            .telemetry_dropped
+            .fetch_add(1, Ordering::Relaxed);
+        let status = match error {
+            TrySendError::Full(_) => "queue_full",
+            TrySendError::Disconnected(_) => "worker_unavailable",
+        };
+        log_json(json!({"event":"polyform_telemetry","status":status}));
     }
 }
 
-fn handle_connection(
+fn run_management_listener(listener: TcpListener, runtime: Arc<Runtime>) {
+    while !TERMINATE.load(Ordering::SeqCst) {
+        match listener.accept() {
+            Ok((mut stream, _)) => {
+                if stream.set_nonblocking(false).is_err() {
+                    continue;
+                }
+                let result = process_management_request(&mut stream, &runtime);
+                if let Err(fault) = result {
+                    let (status, reason) = fault.status();
+                    let _ = write_simple_response(
+                        &mut stream,
+                        status,
+                        reason,
+                        b"management request rejected\n",
+                        &[],
+                    );
+                }
+                let _ = stream.shutdown(Shutdown::Both);
+            }
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                thread::sleep(Duration::from_millis(10));
+            }
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(_) => break,
+        }
+    }
+}
+
+fn process_management_request(
     stream: &mut TcpStream,
+    runtime: &Runtime,
+) -> std::result::Result<(), Fault> {
+    stream
+        .set_read_timeout(Some(Duration::from_millis(
+            runtime.config.listener.request_header_timeout_ms,
+        )))
+        .map_err(|_| Fault::ClientIo)?;
+    stream
+        .set_write_timeout(Some(Duration::from_millis(
+            runtime.config.listener.upstream_response_timeout_ms,
+        )))
+        .map_err(|_| Fault::ClientIo)?;
+    let (head, remainder) = read_head(stream, MAX_REQUEST_LINE_BYTES + MAX_REQUEST_HEADER_BYTES)?;
+    if !remainder.is_empty() {
+        return Err(Fault::Protocol(PolyguardError::AmbiguousFraming));
+    }
+    let request = runtime
+        .agreement
+        .run("parse_request_line", |implementation| {
+            implementation
+                .parse_request_line
+                .map(|function| function(&head))
+        })?;
+    if request.method != "get" {
+        return Err(Fault::Protocol(PolyguardError::InvalidMethod));
+    }
+    let header_wire = &head[request.bytes_consumed..];
+    let headers = runtime
+        .agreement
+        .run("parse_header_section", |implementation| {
+            implementation
+                .parse_header_section
+                .map(|function| function(header_wire))
+        })?;
+    if headers.bytes_consumed != header_wire.len() {
+        return Err(Fault::Protocol(PolyguardError::InvalidHeader {
+            index: 0,
+            reason: "trailing_bytes".into(),
+        }));
+    }
+    let framing = runtime
+        .agreement
+        .run("determine_body_framing", |implementation| {
+            implementation
+                .determine_body_framing
+                .map(|function| function(&request, &headers))
+        })?;
+    if framing != BodyFraming::None {
+        return Err(Fault::Protocol(PolyguardError::AmbiguousFraming));
+    }
+    let target = runtime
+        .agreement
+        .run("normalize_request_target", |implementation| {
+            implementation
+                .normalize_request_target
+                .map(|function| function(&request))
+        })?;
+    runtime
+        .agreement
+        .run("reconcile_authority", |implementation| {
+            implementation
+                .reconcile_authority
+                .map(|function| function(&target, &headers))
+        })?;
+    let (status, reason, body) = admin_response(&target.routing_path, runtime)
+        .ok_or(Fault::Protocol(PolyguardError::NoRoute))?;
+    write_simple_response(stream, status, reason, &body, &[]).map_err(|_| Fault::ClientIo)
+}
+
+fn handle_connection(
+    stream: &mut ClientStream,
     peer: SocketAddr,
     runtime: &Runtime,
 ) -> std::result::Result<(), Fault> {
@@ -940,7 +1358,7 @@ fn handle_connection(
 }
 
 fn process_request(
-    stream: &mut TcpStream,
+    stream: &mut ClientStream,
     peer: SocketAddr,
     runtime: &Runtime,
 ) -> std::result::Result<(), Fault> {
@@ -1019,10 +1437,6 @@ fn process_request(
         return Err(Fault::Protocol(PolyguardError::UnsupportedUpgrade));
     }
 
-    if let Some(admin) = admin_response(&target.routing_path, runtime) {
-        return write_simple_response(stream, admin.0, admin.1, &admin.2, &[])
-            .map_err(|_| Fault::ClientIo);
-    }
     let route = runtime.agreement.run("match_route", |implementation| {
         implementation
             .match_route
@@ -1036,7 +1450,11 @@ fn process_request(
     let forwarding_policy = ForwardingPolicy {
         trust_incoming: runtime.config.listener.trust_forwarding_headers,
         client_ip: peer.ip().to_string(),
-        proto: "http".into(),
+        proto: if runtime.tls.is_some() {
+            "https".into()
+        } else {
+            "http".into()
+        },
         host: authority_text,
     };
     let forwarding = runtime
@@ -1056,10 +1474,10 @@ fn process_request(
     if input.has_immediate_extra()? {
         return Err(Fault::Protocol(PolyguardError::AmbiguousFraming));
     }
-    let upstream_framing = if body.is_empty() {
+    let upstream_framing = if body.bytes.is_empty() {
         BodyFraming::None
     } else {
-        BodyFraming::ContentLength(body.len() as u64)
+        BodyFraming::ContentLength(body.bytes.len() as u64)
     };
     let canonical =
         runtime
@@ -1081,11 +1499,14 @@ fn process_request(
     let response = exchange_upstream(
         upstream_address,
         &canonical.bytes,
-        &body,
+        body,
         &request.method,
         runtime,
     )?;
-    stream.write_all(&response).map_err(|_| Fault::ClientIo)?;
+    stream
+        .write_all(&response.head)
+        .and_then(|_| stream.write_all(&response.body.bytes))
+        .map_err(|_| Fault::ClientIo)?;
     Ok(())
 }
 
@@ -1101,34 +1522,50 @@ fn authority_string(authority: &EffectiveAuthority) -> String {
 }
 
 fn read_request_body(
-    input: &mut BufferedInput<'_>,
+    input: &mut BufferedInput<'_, ClientStream>,
     framing: &BodyFraming,
     headers: &HeaderBlock,
     runtime: &Runtime,
-) -> std::result::Result<Vec<u8>, Fault> {
+) -> std::result::Result<BufferedBody, Fault> {
     match framing {
-        BodyFraming::None => Ok(Vec::new()),
+        BodyFraming::None => Ok(BufferedBody {
+            bytes: Vec::new(),
+            _permit: runtime.body_memory.reserve(0)?,
+        }),
         BodyFraming::ContentLength(length) => {
             let length = usize::try_from(*length).map_err(|_| Fault::TooLarge)?;
             if length > runtime.config.limits.max_request_body_bytes {
                 return Err(Fault::TooLarge);
             }
-            input.read_exact_vec(length)
+            let permit = runtime.body_memory.reserve(length)?;
+            Ok(BufferedBody {
+                bytes: input.read_exact_vec(length)?,
+                _permit: permit,
+            })
         }
-        BodyFraming::Chunked => read_chunked(
-            input,
-            headers,
-            runtime.config.limits.max_request_body_bytes,
-            &runtime.agreement,
-        ),
+        BodyFraming::Chunked => {
+            let mut permit = runtime.body_memory.reserve(0)?;
+            let bytes = read_chunked(
+                input,
+                headers,
+                runtime.config.limits.max_request_body_bytes,
+                &runtime.agreement,
+                &mut permit,
+            )?;
+            Ok(BufferedBody {
+                bytes,
+                _permit: permit,
+            })
+        }
     }
 }
 
-fn read_chunked(
-    input: &mut BufferedInput<'_>,
+fn read_chunked<S: Read>(
+    input: &mut BufferedInput<'_, S>,
     headers: &HeaderBlock,
     max: usize,
     agreement: &Agreement,
+    permit: &mut MemoryPermit,
 ) -> std::result::Result<Vec<u8>, Fault> {
     let mut decoded = Vec::new();
     loop {
@@ -1168,6 +1605,7 @@ fn read_chunked(
             }
             return Ok(decoded);
         }
+        permit.grow(size)?;
         decoded.extend_from_slice(&input.read_exact_vec(size)?);
         if input.read_exact_vec(2)? != b"\r\n" {
             return Err(Fault::Protocol(PolyguardError::InvalidChunk {
@@ -1202,14 +1640,14 @@ fn declared_trailers(headers: &HeaderBlock) -> std::result::Result<Vec<String>, 
     Ok(result)
 }
 
-struct BufferedInput<'a> {
-    stream: &'a mut TcpStream,
+struct BufferedInput<'a, S: Read> {
+    stream: &'a mut S,
     buffer: Vec<u8>,
     offset: usize,
 }
 
-impl<'a> BufferedInput<'a> {
-    fn new(stream: &'a mut TcpStream, buffer: Vec<u8>) -> Self {
+impl<'a, S: Read> BufferedInput<'a, S> {
+    fn new(stream: &'a mut S, buffer: Vec<u8>) -> Self {
         Self {
             stream,
             buffer,
@@ -1220,26 +1658,6 @@ impl<'a> BufferedInput<'a> {
         self.buffer.len().saturating_sub(self.offset)
     }
 
-    fn has_immediate_extra(&mut self) -> std::result::Result<bool, Fault> {
-        if self.buffered_len() != 0 {
-            return Ok(true);
-        }
-        self.stream
-            .set_nonblocking(true)
-            .map_err(|_| Fault::ClientIo)?;
-        let mut byte = [0_u8; 1];
-        let result = match self.stream.peek(&mut byte) {
-            Ok(0) => Ok(false),
-            Ok(_) => Ok(true),
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => Ok(false),
-            Err(error) if error.kind() == io::ErrorKind::Interrupted => Ok(false),
-            Err(_) => Err(Fault::ClientIo),
-        };
-        self.stream
-            .set_nonblocking(false)
-            .map_err(|_| Fault::ClientIo)?;
-        result
-    }
     fn read_byte(&mut self) -> std::result::Result<u8, Fault> {
         if self.offset < self.buffer.len() {
             let byte = self.buffer[self.offset];
@@ -1290,8 +1708,16 @@ impl<'a> BufferedInput<'a> {
         }
     }
 
-    fn read_to_eof_bounded(self, max: usize) -> std::result::Result<Vec<u8>, Fault> {
+    fn read_to_eof_bounded(
+        self,
+        max: usize,
+        permit: &mut MemoryPermit,
+    ) -> std::result::Result<Vec<u8>, Fault> {
         let mut output = self.buffer[self.offset..].to_vec();
+        if output.len() > max {
+            return Err(Fault::Upstream);
+        }
+        permit.grow(output.len())?;
         let mut scratch = [0_u8; 16_384];
         loop {
             match self.stream.read(&mut scratch) {
@@ -1305,6 +1731,7 @@ impl<'a> BufferedInput<'a> {
                     {
                         return Err(Fault::Upstream);
                     }
+                    permit.grow(count)?;
                     output.extend_from_slice(&scratch[..count]);
                 }
                 Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
@@ -1322,7 +1749,40 @@ impl<'a> BufferedInput<'a> {
     }
 }
 
-fn read_head(stream: &mut TcpStream, max: usize) -> std::result::Result<(Vec<u8>, Vec<u8>), Fault> {
+impl BufferedInput<'_, ClientStream> {
+    fn has_immediate_extra(&mut self) -> std::result::Result<bool, Fault> {
+        if self.buffered_len() != 0 {
+            return Ok(true);
+        }
+        let mut byte = [0_u8; 1];
+        match self.stream {
+            ClientStream::Plain(stream) => {
+                stream.set_nonblocking(true).map_err(|_| Fault::ClientIo)?;
+                let result = match stream.peek(&mut byte) {
+                    Ok(0) => Ok(false),
+                    Ok(_) => Ok(true),
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => Ok(false),
+                    Err(error) if error.kind() == io::ErrorKind::Interrupted => Ok(false),
+                    Err(_) => Err(Fault::ClientIo),
+                };
+                stream.set_nonblocking(false).map_err(|_| Fault::ClientIo)?;
+                result
+            }
+            ClientStream::Tls(stream) => match stream.conn.reader().read(&mut byte) {
+                Ok(0) => Ok(false),
+                Ok(_) => Ok(true),
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => Ok(false),
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => Ok(false),
+                Err(_) => Err(Fault::ClientIo),
+            },
+        }
+    }
+}
+
+fn read_head<R: Read>(
+    stream: &mut R,
+    max: usize,
+) -> std::result::Result<(Vec<u8>, Vec<u8>), Fault> {
     let mut bytes = Vec::new();
     let mut scratch = [0_u8; 2_048];
     loop {
@@ -1347,10 +1807,10 @@ fn read_head(stream: &mut TcpStream, max: usize) -> std::result::Result<(Vec<u8>
 fn exchange_upstream(
     address: SocketAddr,
     request_head: &[u8],
-    body: &[u8],
+    body: BufferedBody,
     method: &str,
     runtime: &Runtime,
-) -> std::result::Result<Vec<u8>, Fault> {
+) -> std::result::Result<UpstreamResponse, Fault> {
     let mut upstream = TcpStream::connect_timeout(
         &address,
         Duration::from_millis(runtime.config.listener.upstream_connect_timeout_ms),
@@ -1368,8 +1828,9 @@ fn exchange_upstream(
         .map_err(|_| Fault::Upstream)?;
     upstream
         .write_all(request_head)
-        .and_then(|_| upstream.write_all(body))
+        .and_then(|_| upstream.write_all(&body.bytes))
         .map_err(|_| Fault::Upstream)?;
+    drop(body);
     upstream
         .shutdown(Shutdown::Write)
         .map_err(|_| Fault::Upstream)?;
@@ -1401,25 +1862,55 @@ fn exchange_upstream(
     let framing = response_framing(&headers, no_body)?;
     let mut input = BufferedInput::new(&mut upstream, remainder);
     let response_body = match framing {
-        ResponseFraming::None => Vec::new(),
+        ResponseFraming::None => BufferedBody {
+            bytes: Vec::new(),
+            _permit: runtime.body_memory.reserve(0)?,
+        },
         ResponseFraming::Length(length) => {
             if length > runtime.config.limits.max_response_body_bytes {
                 return Err(Fault::Upstream);
             }
-            input.read_exact_vec(length).map_err(map_upstream_fault)?
+            let permit = runtime.body_memory.reserve(length)?;
+            BufferedBody {
+                bytes: input.read_exact_vec(length).map_err(map_upstream_fault)?,
+                _permit: permit,
+            }
         }
-        ResponseFraming::Chunked => read_chunked(
-            &mut input,
-            &headers,
-            runtime.config.limits.max_response_body_bytes,
-            &runtime.agreement,
-        )
-        .map_err(map_upstream_fault)?,
+        ResponseFraming::Chunked => {
+            let mut permit = runtime.body_memory.reserve(0)?;
+            let bytes = read_chunked(
+                &mut input,
+                &headers,
+                runtime.config.limits.max_response_body_bytes,
+                &runtime.agreement,
+                &mut permit,
+            )
+            .map_err(map_upstream_fault)?;
+            BufferedBody {
+                bytes,
+                _permit: permit,
+            }
+        }
         ResponseFraming::Close => {
-            input.read_to_eof_bounded(runtime.config.limits.max_response_body_bytes)?
+            let mut permit = runtime.body_memory.reserve(0)?;
+            let bytes = input
+                .read_to_eof_bounded(runtime.config.limits.max_response_body_bytes, &mut permit)?;
+            BufferedBody {
+                bytes,
+                _permit: permit,
+            }
         }
     };
-    serialize_response(status, reason, &sanitized, &response_body)
+    let head = serialize_response_head(status, reason, &sanitized, response_body.bytes.len())?;
+    Ok(UpstreamResponse {
+        head,
+        body: response_body,
+    })
+}
+
+struct UpstreamResponse {
+    head: Vec<u8>,
+    body: BufferedBody,
 }
 
 enum ResponseFraming {
@@ -1488,6 +1979,7 @@ fn map_upstream_fault(fault: Fault) -> Fault {
     match fault {
         Fault::Timeout => Fault::UpstreamTimeout,
         Fault::UpstreamTimeout => Fault::UpstreamTimeout,
+        Fault::Busy => Fault::Busy,
         _ => Fault::Upstream,
     }
 }
@@ -1513,11 +2005,11 @@ fn parse_status_line(head: &[u8]) -> std::result::Result<(u16, &str, usize), Fau
     Ok((code, reason, end + 2))
 }
 
-fn serialize_response(
+fn serialize_response_head(
     status: u16,
     reason: &str,
     headers: &SanitizedHeaders,
-    body: &[u8],
+    body_len: usize,
 ) -> std::result::Result<Vec<u8>, Fault> {
     let mut output = Vec::new();
     write!(&mut output, "HTTP/1.1 {status} {reason}\r\n").map_err(|_| Fault::Internal)?;
@@ -1537,29 +2029,43 @@ fn serialize_response(
     write!(
         &mut output,
         "content-length: {}\r\nconnection: close\r\n\r\n",
-        body.len()
+        body_len
     )
     .map_err(|_| Fault::Internal)?;
-    output.extend_from_slice(body);
     Ok(output)
 }
 
 fn admin_response(path: &str, runtime: &Runtime) -> Option<(u16, &'static str, Vec<u8>)> {
     match path {
         "/_polyguard/health" => Some((200, "OK", b"ok\n".to_vec())),
-        "/_polyguard/ready" => Some((200, "OK", b"ready\n".to_vec())),
+        "/_polyguard/ready" => {
+            let agreement_ready = runtime
+                .agreement
+                .selected_ids()
+                .values()
+                .all(|ids| ids.len() == runtime.agreement.width);
+            let capacity_ready = runtime.metrics.active.load(Ordering::Relaxed)
+                < runtime.config.listener.max_connections
+                && runtime.body_memory.used.load(Ordering::Relaxed) < runtime.body_memory.limit;
+            if agreement_ready && capacity_ready {
+                Some((200, "OK", b"ready\n".to_vec()))
+            } else {
+                Some((503, "Service Unavailable", b"not ready\n".to_vec()))
+            }
+        }
         "/_polyguard/metrics" => Some((200, "OK", format!(
-            "# TYPE polyguard_requests_total counter\npolyguard_requests_total{{outcome=\"accepted\"}} {}\npolyguard_requests_total{{outcome=\"rejected\"}} {}\npolyguard_disagreements_total {}\npolyguard_upstream_failures_total {}\npolyguard_timeouts_total {}\npolyguard_active_connections {}\n",
+            "# TYPE polyguard_requests_total counter\npolyguard_requests_total{{outcome=\"accepted\"}} {}\npolyguard_requests_total{{outcome=\"rejected\"}} {}\npolyguard_disagreements_total {}\npolyguard_upstream_failures_total {}\npolyguard_timeouts_total {}\npolyguard_telemetry_dropped_total {}\npolyguard_active_connections {}\npolyguard_inflight_body_bytes {}\npolyguard_inflight_body_limit_bytes {}\n",
             runtime.metrics.accepted.load(Ordering::Relaxed), runtime.metrics.rejected.load(Ordering::Relaxed),
             runtime.metrics.disagreements.load(Ordering::Relaxed), runtime.metrics.upstream_failures.load(Ordering::Relaxed),
-            runtime.metrics.timeouts.load(Ordering::Relaxed), runtime.metrics.active.load(Ordering::Relaxed),
+            runtime.metrics.timeouts.load(Ordering::Relaxed), runtime.metrics.telemetry_dropped.load(Ordering::Relaxed),
+            runtime.metrics.active.load(Ordering::Relaxed), runtime.body_memory.used.load(Ordering::Relaxed), runtime.body_memory.limit,
         ).into_bytes())),
         _ => None,
     }
 }
 
-fn write_simple_response(
-    stream: &mut TcpStream,
+fn write_simple_response<W: Write>(
+    stream: &mut W,
     status: u16,
     reason: &str,
     body: &[u8],
@@ -1640,6 +2146,7 @@ fn install_signal_handlers() {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rcgen::{CertifiedKey, generate_simple_self_signed};
 
     #[test]
     fn response_framing_rejects_te_and_content_length() {
@@ -1668,6 +2175,51 @@ mod tests {
         assert_eq!(parse_decimal(b"001"), Some(1));
         assert_eq!(parse_decimal(b""), None);
         assert_eq!(parse_decimal(b"1x"), None);
+    }
+
+    #[test]
+    fn aggregate_body_memory_is_bounded_and_released() {
+        let budget = MemoryBudget::new(8);
+        let mut first = budget.reserve(5).unwrap();
+        assert!(matches!(budget.reserve(4), Err(Fault::Busy)));
+        first.grow(3).unwrap();
+        assert!(matches!(budget.reserve(1), Err(Fault::Busy)));
+        drop(first);
+        let full = budget.reserve(8).unwrap();
+        assert_eq!(budget.used.load(Ordering::Relaxed), 8);
+        drop(full);
+        assert_eq!(budget.used.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn tls_configuration_rejects_mismatched_key_material() {
+        let CertifiedKey { cert, signing_key } =
+            generate_simple_self_signed(vec!["example.test".into()]).unwrap();
+        let CertifiedKey {
+            signing_key: wrong_key,
+            ..
+        } = generate_simple_self_signed(vec!["other.test".into()]).unwrap();
+        let directory = std::env::temp_dir().join(format!(
+            "polyguard-tls-config-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir(&directory).unwrap();
+        let certificate_path = directory.join("certificate.pem");
+        let key_path = directory.join("private-key.pem");
+        fs::write(&certificate_path, cert.pem()).unwrap();
+        fs::write(&key_path, wrong_key.serialize_pem()).unwrap();
+        let settings = TlsConfig {
+            certificate_chain_file: certificate_path.to_string_lossy().into_owned(),
+            private_key_file: key_path.to_string_lossy().into_owned(),
+        };
+        assert!(load_tls_config(Some(&settings)).is_err());
+        fs::write(&key_path, signing_key.serialize_pem()).unwrap();
+        assert!(load_tls_config(Some(&settings)).unwrap().is_some());
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

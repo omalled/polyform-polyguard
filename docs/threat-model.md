@@ -30,7 +30,10 @@ protection boundary.
 - Forwarding identity spoofing across an untrusted listener boundary (RFC 7239 §§4–7).
 - Upgrade confusion and incomplete WebSocket handshakes (RFC 6455 §§4.1, 4.2.1, 11.3).
 - Slow clients, oversized metadata and bodies, premature EOF, and upstream stalls through
-  explicit limits, deadlines, and concurrency controls.
+  explicit limits, aggregate memory accounting, deadlines, and concurrency controls.
+- Passive network observation and modification on the client-facing hop when native TLS is
+  configured; certificate issuance, DNS control, private-key custody, and endpoint compromise
+  remain operator responsibilities.
 - Silent generated-code regression through shared conformance, differential, fuzz, raw-TCP,
   integration, and release-evidence gates.
 

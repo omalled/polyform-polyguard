@@ -7,7 +7,8 @@ disagreement causes rejection and connection closure before upstream request byt
 
 ## Request path
 
-1. The listener accepts a bounded number of TCP connections and applies read deadlines.
+1. The listener accepts a bounded number of TCP connections, optionally terminates TLS with
+   Rustls, and applies handshake and read deadlines.
 2. A bounded reader obtains one request line and header section without consuming body bytes.
 3. Selected independent registry implementations parse the same immutable byte slices.
 4. Typed results—including every `bytes_consumed` boundary—must agree exactly.
@@ -51,8 +52,10 @@ agreement mode to a single parser.
 ## Resource model
 
 Protocol limits are defined in `specs/polyform.toml` and enforced before proportional
-allocation. Runtime configuration adds connection concurrency, request-body, response-header,
-response-body, and timeout bounds. Each connection has a bounded lifetime, and graceful
+allocation. Runtime configuration adds connection concurrency, per-message body, aggregate
+in-flight body-memory, response-header, and timeout bounds. Exhausting the aggregate budget
+returns 503 before allocation and makes readiness fail until the reservation is released.
+Each connection has a bounded lifetime, and graceful
 shutdown stops accepting new connections before waiting for active work.
 
 ## Deliberate non-goals

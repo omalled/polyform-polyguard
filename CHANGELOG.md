@@ -5,6 +5,23 @@ after the initial experimental release.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-08-30
+
+### Added
+
+- Native HTTPS termination using Rustls with HTTP/1.1 ALPN and strict certificate/key startup
+  validation.
+- Separate management listener and saturation-aware readiness.
+- Aggregate in-flight body-memory accounting and a reproducible concurrent soak gate.
+- Release-time and CI dependency vulnerability auditing.
+
+### Fixed
+
+- Restore accepted sockets to blocking mode so configured partial-request deadlines work on every
+  supported platform.
+- Move telemetry and composition refresh network operations off request and accept paths.
+- Avoid duplicating complete response bodies during canonical serialization.
+
 ## [0.1.2] - 2026-08-30
 
 ### Fixed

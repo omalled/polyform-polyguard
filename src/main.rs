@@ -2,8 +2,10 @@ use std::path::PathBuf;
 
 use polyform_polyguard::{proxy, registered_implementations};
 
-const HELP: &str = "\
-Polyguard 0.1.2 — security-first HTTP/1.1 reverse proxy
+const HELP: &str = concat!(
+    "Polyguard ",
+    env!("CARGO_PKG_VERSION"),
+    " — security-first HTTP/1.1 reverse proxy
 
 Usage: polyguard --config <FILE>
        polyguard --check-config <FILE>
@@ -11,7 +13,8 @@ Usage: polyguard --config <FILE>
 
 Polyguard compares independently registered protocol-core implementations and
 rejects requests when they disagree.
-";
+"
+);
 
 fn main() {
     let implementations = registered_implementations();

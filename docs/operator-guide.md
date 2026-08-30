@@ -19,8 +19,10 @@ unavailable or quarantined implementation by lowering the width on a running pro
 - `/_polyguard/metrics` exposes bounded counters using fixed outcome names; it has no target, authority,
   client-address, header, or body labels.
 
-These endpoints should be limited to a management network at the deployment boundary. They are
-served locally by Polyguard and are never forwarded upstream.
+These endpoints are disabled unless `listener.management_address` is configured. They are served
+only on that separate listener and are never intercepted on the traffic listener. Bind management
+to loopback or a protected management network. Readiness returns 503 while connection or aggregate
+body-memory capacity is exhausted or the agreement set cannot be formed.
 
 ## Shutdown and deadlines
 
@@ -59,10 +61,23 @@ member of Polyguard's local agreement set; it never reduces `agreement_implement
 refresh retains the last verified composition. `required = false` permits an explicitly logged
 startup fallback to the local static agreement set when registration is unavailable.
 
-## Upgrades and TLS
+## TLS and upgrades
 
-The v0.1.0 listener is cleartext HTTP/1.1. Terminate TLS at a maintained edge proxy and restrict
-the network hop to Polyguard. WebSocket upgrade requests are parsed and classified but rejected;
+Configure native HTTPS with a PEM certificate chain and matching unencrypted PKCS#1, PKCS#8, or
+SEC1 private key:
+
+```toml
+[listener.tls]
+certificate_chain_file = "/etc/polyguard/tls/fullchain.pem"
+private_key_file = "/etc/polyguard/tls/private-key.pem"
+```
+
+Polyguard uses Rustls safe protocol and cipher-suite defaults, advertises only HTTP/1.1 through
+ALPN, rejects mismatched certificate/key material before binding, disables early data, and sends
+TLS `close_notify` during normal shutdown. Certificate rotation currently requires a process
+restart. Cleartext HTTP remains available only when the TLS section is omitted.
+
+WebSocket upgrade requests are parsed and classified but rejected;
 there is no partial tunnel mode. HTTP/2 prefaces, unsupported transfer codings, close-delimited
 request bodies, pipelining behind a body boundary, and ambiguous framing are rejected.
 

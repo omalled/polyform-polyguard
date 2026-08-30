@@ -19,11 +19,27 @@ cargo run --release --bin polyguard -- --config polyguard.toml
 curl --http1.1 -H 'Host: example.test' http://127.0.0.1:8080/
 ```
 
-The release executable supports one process, multiple named upstreams, exact-host and
+The executable supports native HTTPS with Rustls, one process, multiple named upstreams, exact-host and
 boundary-aware longest-path routing, explicit limits and deadlines, health/readiness endpoints,
-graceful shutdown, structured diagnostics, and privacy-safe outcome metrics. The v0.1.2
-release notes identify any feature (notably TLS or WebSocket tunneling) that remains deliberately
+graceful shutdown, structured diagnostics, and privacy-safe outcome metrics. The release notes
+identify any feature (notably WebSocket tunneling) that remains deliberately
 unsupported and is therefore rejected.
+
+For a local HTTPS check, create a disposable certificate, update the paths and host in
+`polyguard.https.example.toml`, and start Polyguard:
+
+```sh
+mkdir -p .local-tls
+openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
+  -keyout .local-tls/private-key.pem -out .local-tls/fullchain.pem \
+  -subj '/CN=example.test' -addext 'subjectAltName=DNS:example.test'
+cargo run --release --bin polyguard -- --config polyguard.https.example.toml
+curl --cacert .local-tls/fullchain.pem --resolve example.test:8443:127.0.0.1 \
+  https://example.test:8443/
+```
+
+The HTTPS example uses production-oriented connection and aggregate body-memory limits. Replace
+the disposable certificate with an automatically renewed certificate before deployment.
 
 ## Security behavior
 
@@ -66,5 +82,5 @@ the live project is on the [Polyform dashboard](https://omalled.com/polyform/oma
 
 Polyguard is intentionally HTTP/1.1-only. It does not approximate HTTP/2, close-delimited
 request bodies, unsupported transfer codings, ambiguous pipelining, or incomplete upgrades.
-Connection reuse is not required for v0.1.2; canonical requests use `Connection: close` to keep
+Connection reuse is not required for v0.2.0; canonical requests use `Connection: close` to keep
 boundaries explicit. Consult the release notes before exposing a listener to untrusted networks.
