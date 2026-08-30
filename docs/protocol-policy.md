@@ -27,20 +27,25 @@ limits, examples, and error precedence are in `specs/polyform.toml`.
 - Unsupported upgrades and incomplete WebSocket handshakes.
 - `Expect: 100-continue` in this release; the runtime does not implement the
   documented bounded handshake. It is never silently forwarded before a body decision.
-- Pipelining on a client connection in this release. One request is processed per accepted
-  connection and both legs use `Connection: close`.
+- Pipelined bytes. A client may send the next request only after receiving the previous response;
+  unexpected bytes behind a framed request are rejected as ambiguous.
 
 ## Canonical upstream form
 
 The upstream request uses uppercase method, normalized origin-form target, one trusted `Host`,
 lowercase retained end-to-end header names, reconstructed forwarding fields, exactly one framing
-field when needed, and `Connection: close`. Fixed and dynamically nominated hop-by-hop headers are
-removed. Canonical output is reparsed during tests to verify the same typed meaning.
+field when needed, and `Connection: close` on the single-request upstream connection. Fixed and
+dynamically nominated hop-by-hop headers are removed. Canonical output is reparsed during tests to
+verify the same typed meaning.
 
 ## Error handling
 
 Polyguard returns `400 Bad Request` for syntax and framing rejection, `404 Not Found` for no
-route, `413 Content Too Large` for body/metadata limits where appropriate, `426 Upgrade Required`
-or `400` for unsupported upgrade intent, `502 Bad Gateway` for upstream failures, and `504
-Gateway Timeout` for upstream deadlines. A disagreement uses a generic `400` and closes without
-exposing implementation details to the client.
+route, `413 Content Too Large` for body/metadata limits where appropriate, `416 Range Not
+Satisfiable` for an invalid supported static range, `501 Not Implemented` for upgrade intent,
+`502 Bad Gateway` for upstream failures, and `504 Gateway Timeout` for upstream deadlines. A
+disagreement uses a generic `400` and closes without exposing implementation details to the
+client.
+
+Upstream informational (`1xx`) responses are rejected with `502`; this release does not implement
+an informational-response state machine and never treats an interim response as terminal.

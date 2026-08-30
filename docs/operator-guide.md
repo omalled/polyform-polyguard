@@ -31,6 +31,11 @@ receive up to `graceful_shutdown_timeout_ms`, and the process then exits. Client
 request bodies, upstream connects, and upstream responses have separate deadlines. A timeout is
 closed and counted; Polyguard does not attempt to recover an ambiguous stream.
 
+`SIGHUP` validates a complete replacement configuration and all TLS files before atomically
+activating it. Existing connections keep their prior immutable generation. Invalid reloads retain
+the working generation. Listener address additions and removals require a restart; route,
+upstream, header, limit, compression, static-root, and certificate changes do not.
+
 ## Logging and telemetry
 
 Operational records are newline-delimited JSON with timestamps, event names, fixed outcome
@@ -64,7 +69,7 @@ startup fallback to the local static agreement set when registration is unavaila
 ## TLS and upgrades
 
 Configure native HTTPS with a PEM certificate chain and matching unencrypted PKCS#1, PKCS#8, or
-SEC1 private key:
+SEC1 private key. A legacy single-certificate listener uses:
 
 ```toml
 [listener.tls]
@@ -72,14 +77,39 @@ certificate_chain_file = "/etc/polyguard/tls/fullchain.pem"
 private_key_file = "/etc/polyguard/tls/private-key.pem"
 ```
 
-Polyguard uses Rustls safe protocol and cipher-suite defaults, advertises only HTTP/1.1 through
-ALPN, rejects mismatched certificate/key material before binding, disables early data, and sends
-TLS `close_notify` during normal shutdown. Certificate rotation currently requires a process
-restart. Cleartext HTTP remains available only when the TLS section is omitted.
+For multiple virtual hosts on one listener, replace those two fields with one or more entries:
 
-WebSocket upgrade requests are parsed and classified but rejected;
-there is no partial tunnel mode. HTTP/2 prefaces, unsupported transfer codings, close-delimited
-request bodies, pipelining behind a body boundary, and ambiguous framing are rejected.
+```toml
+[[listener.tls.certificates]]
+server_names = ["app.example.test", "*.app.example.test"]
+certificate_chain_file = "/etc/letsencrypt/live/app.example.test/fullchain.pem"
+private_key_file = "/etc/letsencrypt/live/app.example.test/privkey.pem"
+default = true
+
+[[listener.tls.certificates]]
+server_names = ["assets.example.test"]
+certificate_chain_file = "/etc/letsencrypt/live/assets.example.test/fullchain.pem"
+private_key_file = "/etc/letsencrypt/live/assets.example.test/privkey.pem"
+```
+
+Add `[[listeners]]` entries for other traffic sockets. Each listener can be cleartext or have its
+own TLS configuration. Polyguard uses Rustls safe protocol and cipher-suite defaults, advertises
+only HTTP/1.1 through ALPN, rejects mismatched certificate/key material before binding, disables
+early data, rejects supplied SNI/Host disagreement, and sends TLS `close_notify` during normal
+shutdown. A successful SIGHUP rotates certificate contents without dropping the listener.
+
+WebSocket upgrade requests are parsed and classified but rejected; there is no partial tunnel
+mode. HTTP/2 prefaces, unsupported transfer codings, close-delimited request bodies, pipelined
+requests, and ambiguous framing are rejected. Sequential HTTP/1.1 client keep-alive is supported;
+upstream connections remain single-request.
+
+## Nginx configuration migration
+
+Run `polyguard --check-nginx /etc/nginx/nginx.conf` against the complete configuration, including
+all site and certificate-tool includes. Start with `--nginx-config` only after validation succeeds.
+The parser fails closed with source locations for unsupported behavior. The exact support matrix,
+reload rules, systemd unit, and certificate-renewal hook are in `nginx-compatibility.md` and
+`packaging/`.
 
 ## Incident response
 

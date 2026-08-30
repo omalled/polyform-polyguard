@@ -1,6 +1,6 @@
 # Implementation diversity review
 
-Polyguard v0.2.0 contains exactly five accepted implementations for each of 13 public
+Polyguard contains exactly five accepted implementations for each of 13 public
 specification functions (65 registry entries). Every entry owns its interpretation logic and
 implements exactly one public function. Shared code is limited to data models, dispatch,
 networking, and tests; there is no shared HTTP parser hidden beneath the variants.

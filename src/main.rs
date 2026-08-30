@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use polyform_polyguard::{proxy, registered_implementations};
+use polyform_polyguard::{nginx, proxy, registered_implementations};
 
 const HELP: &str = concat!(
     "Polyguard ",
@@ -9,6 +9,9 @@ const HELP: &str = concat!(
 
 Usage: polyguard --config <FILE>
        polyguard --check-config <FILE>
+       polyguard --nginx-config <FILE>
+       polyguard --check-nginx <FILE>
+       polyguard --import-nginx <FILE>
        polyguard --implementations
 
 Polyguard compares independently registered protocol-core implementations and
@@ -39,14 +42,57 @@ fn main() {
         Some("--config") => {
             let path = required_path(&mut arguments, "--config");
             let config = proxy::load_config(&path).unwrap_or_else(|error| fail(&error.to_string()));
-            if let Err(error) = proxy::run(config) {
+            let reload_path = path.clone();
+            if let Err(error) = proxy::run_reloading(config, move || {
+                proxy::load_config(&reload_path).map_err(std::io::Error::other)
+            }) {
                 fail(&format!("proxy failed: {error}"));
             }
+        }
+        Some("--check-nginx") => {
+            let path = required_path(&mut arguments, "--check-nginx");
+            match nginx::load_config(&path) {
+                Ok(config) => {
+                    println!(
+                        "Nginx configuration is compatible ({} listener(s), {} site(s))",
+                        config.listeners.len() + 1,
+                        config.sites.len()
+                    );
+                }
+                Err(error) => fail_nginx(error),
+            }
+        }
+        Some("--nginx-config") => {
+            let path = required_path(&mut arguments, "--nginx-config");
+            let config = nginx::load_config(&path).unwrap_or_else(|error| fail_nginx(error));
+            let reload_path = path.clone();
+            if let Err(error) = proxy::run_reloading(config, move || {
+                nginx::load_config(&reload_path).map_err(std::io::Error::other)
+            }) {
+                fail(&format!("proxy failed: {error}"));
+            }
+        }
+        Some("--import-nginx") => {
+            let path = required_path(&mut arguments, "--import-nginx");
+            let config = nginx::load_config(&path).unwrap_or_else(|error| fail_nginx(error));
+            let serialized = toml::to_string_pretty(&config).unwrap_or_else(|error| {
+                fail(&format!("could not serialize configuration: {error}"))
+            });
+            print!("{serialized}");
         }
         Some(argument) => {
             fail(&format!("unknown option: {argument}"));
         }
     }
+}
+
+fn fail_nginx(error: nginx::NginxError) -> ! {
+    if let nginx::NginxError::Unsupported(issues) = &error {
+        for issue in issues {
+            eprintln!("{issue}");
+        }
+    }
+    fail(&error.to_string())
 }
 
 fn required_path(arguments: &mut impl Iterator<Item = String>, option: &str) -> PathBuf {

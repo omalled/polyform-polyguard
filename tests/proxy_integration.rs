@@ -14,6 +14,7 @@ use rustls::{ClientConfig, ClientConnection, RootCertStore, StreamOwned};
 struct ProxyProcess {
     child: Child,
     directory: PathBuf,
+    config: PathBuf,
     management: SocketAddr,
 }
 
@@ -150,6 +151,7 @@ upstream = "app"
     ProxyProcess {
         child,
         directory,
+        config,
         management,
     }
 }
@@ -239,7 +241,13 @@ fn send(address: SocketAddr, wire: &[u8]) -> Vec<u8> {
     stream.write_all(wire).unwrap();
     stream.shutdown(Shutdown::Write).unwrap();
     let mut response = Vec::new();
-    stream.read_to_end(&mut response).unwrap();
+    if let Err(error) = stream.read_to_end(&mut response) {
+        assert_eq!(
+            error.kind(),
+            std::io::ErrorKind::ConnectionReset,
+            "response read failed: {error}"
+        );
+    }
     response
 }
 
@@ -329,6 +337,87 @@ fn read_request(stream: &mut TcpStream) -> Vec<u8> {
     wire
 }
 
+fn read_response(stream: &mut TcpStream) -> Vec<u8> {
+    let mut wire = Vec::new();
+    let mut scratch = [0_u8; 1024];
+    let head_end = loop {
+        let count = stream.read(&mut scratch).unwrap();
+        assert_ne!(count, 0, "premature response EOF");
+        wire.extend_from_slice(&scratch[..count]);
+        if let Some(index) = wire.windows(4).position(|window| window == b"\r\n\r\n") {
+            break index + 4;
+        }
+    };
+    let head = String::from_utf8_lossy(&wire[..head_end]).to_ascii_lowercase();
+    let length = head
+        .lines()
+        .find_map(|line| line.strip_prefix("content-length: "))
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .unwrap();
+    while wire.len() < head_end + length {
+        let count = stream.read(&mut scratch).unwrap();
+        assert_ne!(count, 0, "premature response body EOF");
+        wire.extend_from_slice(&scratch[..count]);
+    }
+    wire
+}
+
+#[test]
+fn sequential_keep_alive_requests_are_counted_individually() {
+    let upstream = TcpListener::bind("127.0.0.1:0").unwrap();
+    let upstream_address = upstream.local_addr().unwrap();
+    let proxy_address = free_address();
+    let proxy = start_proxy(proxy_address, upstream_address, 1_024);
+    let server = thread::spawn(move || {
+        for expected in ["/one", "/two"] {
+            let (mut stream, _) = upstream.accept().unwrap();
+            let request = read_request(&mut stream);
+            let request_text = String::from_utf8_lossy(&request).to_ascii_lowercase();
+            assert!(
+                request_text.starts_with(&format!("get {expected} http/1.1")),
+                "{request:?}"
+            );
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+                .unwrap();
+        }
+    });
+
+    let mut client = TcpStream::connect(proxy_address).unwrap();
+    client
+        .set_read_timeout(Some(Duration::from_secs(3)))
+        .unwrap();
+    client
+        .write_all(b"GET /one HTTP/1.1\r\nHost: example.test\r\n\r\n")
+        .unwrap();
+    let first = read_response(&mut client);
+    assert!(first.starts_with(b"HTTP/1.1 200 OK"), "{first:?}");
+    assert!(
+        String::from_utf8_lossy(&first).contains("connection: keep-alive"),
+        "{first:?}"
+    );
+    client
+        .write_all(b"GET /two HTTP/1.1\r\nHost: example.test\r\nConnection: close\r\n\r\n")
+        .unwrap();
+    let second = read_response(&mut client);
+    assert!(second.starts_with(b"HTTP/1.1 200 OK"), "{second:?}");
+    assert!(
+        String::from_utf8_lossy(&second).contains("connection: close"),
+        "{second:?}"
+    );
+    server.join().unwrap();
+
+    let metrics = send(
+        proxy.management,
+        b"GET /_polyguard/metrics HTTP/1.1\r\nHost: localhost\r\n\r\n",
+    );
+    assert!(
+        String::from_utf8_lossy(&metrics)
+            .contains("polyguard_requests_total{outcome=\"accepted\"} 2\n"),
+        "{metrics:?}"
+    );
+}
+
 #[test]
 fn smuggling_is_rejected_before_upstream_and_valid_request_is_canonical() {
     let upstream = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -394,6 +483,32 @@ fn chunked_request_is_fully_validated_then_forwarded_with_one_length() {
     assert!(text.contains("content-length: 9\r\n"), "{text}");
     assert!(!text.contains("transfer-encoding"), "{text}");
     assert!(request.ends_with(b"\r\n\r\nWikipedia"));
+    server.join().unwrap();
+}
+
+#[test]
+fn upstream_informational_response_is_not_mistaken_for_a_final_response() {
+    let upstream = TcpListener::bind("127.0.0.1:0").unwrap();
+    let upstream_address = upstream.local_addr().unwrap();
+    let proxy_address = free_address();
+    let server = thread::spawn(move || {
+        let (mut stream, _) = upstream.accept().unwrap();
+        let _ = read_request(&mut stream);
+        stream
+            .write_all(
+                b"HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok",
+            )
+            .unwrap();
+    });
+    let _proxy = start_proxy(proxy_address, upstream_address, 1_024);
+    let response = send(
+        proxy_address,
+        b"GET / HTTP/1.1\r\nHost: example.test\r\nConnection: close\r\n\r\n",
+    );
+    assert!(
+        response.starts_with(b"HTTP/1.1 502 Bad Gateway"),
+        "{response:?}"
+    );
     server.join().unwrap();
 }
 
@@ -494,4 +609,65 @@ fn sigterm_stops_the_listener_cleanly() {
         assert!(Instant::now() < deadline, "proxy ignored SIGTERM");
         thread::sleep(Duration::from_millis(10));
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn sighup_atomically_reloads_valid_config_and_retains_the_previous_generation_on_error() {
+    unsafe extern "C" {
+        fn kill(process: i32, signal: i32) -> i32;
+    }
+
+    let first_upstream = TcpListener::bind("127.0.0.1:0").unwrap();
+    let first_address = first_upstream.local_addr().unwrap();
+    let second_upstream = TcpListener::bind("127.0.0.1:0").unwrap();
+    let second_address = second_upstream.local_addr().unwrap();
+    let proxy_address = free_address();
+    let proxy = start_proxy(proxy_address, first_address, 1_024);
+    let first_server = thread::spawn(move || {
+        let (mut stream, _) = first_upstream.accept().unwrap();
+        let _ = read_request(&mut stream);
+        stream
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\none")
+            .unwrap();
+    });
+    let first = send(
+        proxy_address,
+        b"GET / HTTP/1.1\r\nHost: example.test\r\nConnection: close\r\n\r\n",
+    );
+    assert!(first.ends_with(b"\r\n\r\none"), "{first:?}");
+    first_server.join().unwrap();
+
+    let original = fs::read_to_string(&proxy.config).unwrap();
+    let replacement = original.replace(&first_address.to_string(), &second_address.to_string());
+    fs::write(&proxy.config, &replacement).unwrap();
+    assert_eq!(unsafe { kill(proxy.child.id() as i32, 1) }, 0);
+    thread::sleep(Duration::from_millis(150));
+
+    let second_server = thread::spawn(move || {
+        for _ in 0..2 {
+            let (mut stream, _) = second_upstream.accept().unwrap();
+            let _ = read_request(&mut stream);
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\ntwo")
+                .unwrap();
+        }
+    });
+    let second = send(
+        proxy_address,
+        b"GET / HTTP/1.1\r\nHost: example.test\r\nConnection: close\r\n\r\n",
+    );
+    assert!(second.ends_with(b"\r\n\r\ntwo"), "{second:?}");
+
+    let invalid_address = free_address();
+    let invalid = replacement.replace(&proxy_address.to_string(), &invalid_address.to_string());
+    fs::write(&proxy.config, invalid).unwrap();
+    assert_eq!(unsafe { kill(proxy.child.id() as i32, 1) }, 0);
+    thread::sleep(Duration::from_millis(150));
+    let retained = send(
+        proxy_address,
+        b"GET / HTTP/1.1\r\nHost: example.test\r\nConnection: close\r\n\r\n",
+    );
+    assert!(retained.ends_with(b"\r\n\r\ntwo"), "{retained:?}");
+    second_server.join().unwrap();
 }

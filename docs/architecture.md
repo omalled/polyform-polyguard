@@ -18,8 +18,9 @@ disagreement causes rejection and connection closure before upstream request byt
    output must agree with its peers and reparse to the agreed typed meaning.
 7. The body is copied according to the single agreed framing: exactly the declared length, or
    decoded chunk boundaries with bounded trailers. The proxy never uses request close-delimiting.
-8. The upstream response is relayed with explicit bounds and deadlines. This first release does
-   not reuse client or upstream connections; `Connection: close` makes message boundaries clear.
+8. The upstream response is relayed with explicit bounds and deadlines. A client connection may
+   carry sequential requests when each boundary is unambiguous; pipelined bytes are rejected.
+   Upstream connections remain single-request and use `Connection: close`.
 9. Access metrics use fixed outcome categories. Request targets, headers, bodies, authorities,
    client addresses, credentials, and error text are excluded from Polyform telemetry.
 
@@ -55,8 +56,10 @@ Protocol limits are defined in `specs/polyform.toml` and enforced before proport
 allocation. Runtime configuration adds connection concurrency, per-message body, aggregate
 in-flight body-memory, response-header, and timeout bounds. Exhausting the aggregate budget
 returns 503 before allocation and makes readiness fail until the reservation is released.
-Each connection has a bounded lifetime, and graceful
-shutdown stops accepting new connections before waiting for active work.
+Each connection has a bounded request count and lifetime. Graceful shutdown stops accepting new
+connections before waiting for active work. Reload builds and validates a complete immutable
+generation—including TLS material—before atomically replacing the live generation; active
+connections retain their original generation.
 
 ## Deliberate non-goals
 

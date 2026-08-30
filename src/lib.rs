@@ -7,6 +7,7 @@
 use serde::{Deserialize, Serialize};
 
 mod implementations;
+pub mod nginx;
 pub mod proxy;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

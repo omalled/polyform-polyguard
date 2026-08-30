@@ -5,6 +5,32 @@ after the initial experimental release.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-08-30
+
+### Added
+
+- Fail-closed Nginx configuration validation, direct execution, and native TOML import for a
+  documented reverse-proxy, virtual-host, TLS, static-file, redirect, header, access-control,
+  body-limit, compression, and CORS subset.
+- Multiple cleartext/TLS listeners and multiple exact or wildcard SNI certificates.
+- Typed proxy, redirect, fixed-response, and bounded static-file route actions with MIME types,
+  indexes, custom error pages, gzip negotiation, and single byte ranges.
+- Sequential client HTTP/1.1 keep-alive with per-request metrics and telemetry.
+- Atomic SIGHUP configuration and certificate reload with previous-generation retention on error.
+- Generic systemd and certificate-renewal hook examples.
+
+### Security
+
+- Reject TLS requests whose supplied SNI name disagrees with the independently reconciled HTTP
+  authority.
+- Reject unsupported Nginx listener flags and configurations instead of silently approximating
+  them.
+- Preserve exact-over-wildcard virtual-host precedence and fail closed when socket-specific Nginx
+  behavior cannot be represented by authority/scheme routing.
+- Apply hard rendered-template limits and shared cross-generation memory accounting to static,
+  generated, proxied, and gzip response buffers.
+- Reject upstream informational responses rather than treating an interim head as final.
+
 ## [0.2.0] - 2026-08-30
 
 ### Added

@@ -1,0 +1,72 @@
+[listener]
+address = "0.0.0.0:443"
+management_address = "127.0.0.1:9090"
+trust_forwarding_headers = false
+security_mode = "agreement"
+agreement_implementations = 2
+max_connections = 1024
+request_header_timeout_ms = 5000
+request_body_timeout_ms = 30000
+upstream_connect_timeout_ms = 3000
+upstream_response_timeout_ms = 30000
+graceful_shutdown_timeout_ms = 10000
+
+[[listener.tls.certificates]]
+server_names = ["app.example.test"]
+certificate_chain_file = "/etc/letsencrypt/live/app.example.test/fullchain.pem"
+private_key_file = "/etc/letsencrypt/live/app.example.test/privkey.pem"
+default = true
+
+[[listener.tls.certificates]]
+server_names = ["static.example.test"]
+certificate_chain_file = "/etc/letsencrypt/live/static.example.test/fullchain.pem"
+private_key_file = "/etc/letsencrypt/live/static.example.test/privkey.pem"
+
+[[listeners]]
+address = "0.0.0.0:80"
+
+[limits]
+max_request_body_bytes = 16777216
+max_response_header_bytes = 32768
+max_response_body_bytes = 67108864
+max_inflight_body_bytes = 134217728
+
+[compression]
+enabled = true
+min_size_bytes = 1024
+types = ["text/html", "text/css", "application/javascript", "application/json", "image/svg+xml"]
+
+[[upstreams]]
+name = "app"
+address = "127.0.0.1:3000"
+
+[[sites]]
+server_names = ["app.example.test"]
+
+[[sites.routes]]
+path = "/"
+schemes = ["http"]
+action = { type = "redirect", status = 308, location = "https://$host$request_uri" }
+
+[[sites.routes]]
+path = "/"
+schemes = ["https"]
+max_request_body_bytes = 8388608
+action = { type = "proxy", upstream = "app", host_header = "$host" }
+
+[[sites]]
+server_names = ["static.example.test"]
+
+[[sites.routes]]
+path = "/"
+schemes = ["http"]
+action = { type = "redirect", status = 308, location = "https://$host$request_uri" }
+
+[[sites.routes]]
+path = "/"
+schemes = ["https"]
+response_headers = [
+  { name = "strict-transport-security", value = "max-age=31536000", always = true },
+  { name = "x-content-type-options", value = "nosniff", always = true },
+]
+action = { type = "static", directory = "/srv/www/static.example.test", mapping = "root", index = ["index.html"], try_files = true }
