@@ -240,4 +240,13 @@ remaining v0.1.2 synthetic/exposure alerts became historical rather than active/
 service exposes no release selector for adding resolution events to those old rows. A verified
 v0.2 installation then registered successfully with a signed balanced composition and proxied ten
 healthy HTTPS requests without local telemetry errors or dropped events. The synthetic installation
-identifier and runtime state remain only in ignored temporary state, not in the repository.
+identifier and runtime state remained only in ignored temporary state and were deleted after the
+test; no private installation data entered the repository.
+
+The accepted v0.2 execution reports had not appeared in the dashboard by the final repeated refresh:
+the active composition and client were visible, but the page still showed zero telemetry events and
+zero per-implementation executions. The proxy logged no hosted-report failures, its bounded queue
+reported zero drops, and the same hosted execution path was visibly proven during the v0.1.2
+lifecycle, so this is classified as a Polyform ingestion/dashboard freshness discrepancy rather
+than a Polyguard data-plane failure. Operators should not rely on the hosted dashboard as their
+only immediate v0.2 health signal; local readiness, counters, and structured logs remain required.

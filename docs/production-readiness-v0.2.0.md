@@ -27,7 +27,9 @@ monitor readiness and disagreement/drop counters, and retain a known-good edge r
 - Resource behavior: per-message and aggregate body limits, connection cap, slow/partial input,
   saturation readiness, queue overflow accounting, and post-overload recovery are tested.
 - Dashboard: the active v0.2 release has no investigated or quarantined implementation; a signed
-  balanced installation registered and received a valid composition.
+  balanced installation registered and received a valid composition. Its accepted execution
+  reports had not surfaced in the hosted dashboard by final observation, so canary monitoring must
+  retain local metrics/logs while that Polyform freshness discrepancy is investigated.
 
 Artifact hashes and the detailed commands, discrepancies, workarounds, lifecycle experiments, and
 dashboard residue are recorded in `docs/polyform-lifecycle.md`.
