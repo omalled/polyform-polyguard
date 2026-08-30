@@ -219,6 +219,13 @@ installed binary proxied a real HTTPS request to a controlled HTTP upstream, ret
 ready management status, reported zero disagreements/drops/failures with body memory returned to
 zero, and shut down gracefully with zero active connections.
 
+The public update path was exercised independently: a new temporary location first installed and
+verified v0.1.2 / release 5 with executable hash
+`ab5d5e08e9ba2c867fd7dabc66c638c4fada873d3f8f1afbb67743d9968401fd`; `polyform update
+omalled/polyguard --version 0.2.0` then atomically replaced it with release 6. The resulting help
+identified version 0.2.0, its executable matched the published v0.2.0 macOS hash, and the trust
+metadata advanced from release 5/version 0.1.2 to release 6/version 0.2.0.
+
 The first generated `SHA256SUMS` asset used build-directory prefixes and predated the asynchronous
 Linux upload. The asset was replaced with a portable basename-only list covering both executables,
 the manifest, and evidence; an independent clean download verified all four entries. The release
