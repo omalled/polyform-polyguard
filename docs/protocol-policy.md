@@ -25,9 +25,9 @@ limits, examples, and error precedence are in `specs/polyform.toml`.
   traversal above root, userinfo, invalid ports, unbracketed IPv6, and authority/Host mismatch.
 - Undeclared, duplicate, or security-sensitive trailer fields.
 - Unsupported upgrades and incomplete WebSocket handshakes.
-- `Expect: 100-continue` in the first release unless the runtime explicitly implements the
+- `Expect: 100-continue` in this release; the runtime does not implement the
   documented bounded handshake. It is never silently forwarded before a body decision.
-- Pipelining on a client connection in the first release. One request is processed per accepted
+- Pipelining on a client connection in this release. One request is processed per accepted
   connection and both legs use `Connection: close`.
 
 ## Canonical upstream form

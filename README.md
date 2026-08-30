@@ -6,7 +6,7 @@ the same bounded request metadata, and the default agreement mode rejects and cl
 upstream bytes are written if their typed results differ.
 
 ```text
-client → HTTP/1.1 → Polyguard → HTTP/1.1 application servers
+client → TLS/HTTP/1.1 → Polyguard → HTTP/1.1 application servers
 ```
 
 ## Quick start
@@ -63,9 +63,9 @@ standards citations and adversarial examples is [the Polyform specification](spe
 
 ```sh
 cargo fmt -- --check
-cargo clippy --all-targets -- -D warnings
-cargo test --all-targets
-polyform check
+cargo clippy --all-targets --locked -- -D warnings
+cargo test --all-targets --locked
+./scripts/release-check.sh
 ```
 
 To use a published Polyform composition, add a `[polyform]` section as documented in the operator
