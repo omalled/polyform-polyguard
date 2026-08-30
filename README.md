@@ -75,7 +75,7 @@ Polyguard still executes the configured number of independent local peers and re
 Fuzz seeds, raw-TCP tests, local upstream integration tests, clean-install checks, release
 checksums, publication URLs, and the labeled quarantine/restore experiment are recorded in the
 [lifecycle log](docs/polyform-lifecycle.md). The public artifacts are in the
-[v0.1.2 GitHub release](https://github.com/omalled/polyform-polyguard/releases/tag/v0.1.2), and
+[v0.2.0 GitHub release](https://github.com/omalled/polyform-polyguard/releases/tag/v0.2.0), and
 the live project is on the [Polyform dashboard](https://omalled.com/polyform/omalled/polyguard/dashboard).
 
 ## Current restrictions

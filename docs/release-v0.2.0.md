@@ -1,7 +1,7 @@
 # Polyguard v0.2.0 release notes
 
-Status: release candidate until signed Polyform publication, downloadable artifacts, clean
-installation, HTTPS smoke testing, and GitHub release verification are complete.
+Polyguard v0.2.0 adds native HTTPS and closes the production-readiness gaps found during the
+post-v0.1.2 operational review.
 
 ## Production hardening
 
