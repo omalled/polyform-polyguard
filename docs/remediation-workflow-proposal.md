@@ -1,7 +1,12 @@
 # Proposed Polyform implementation remediation workflow
 
-This proposal is an operator-centered target design. The lifecycle evaluation will annotate it
-with what the current CLI and dashboard actually support.
+This proposal is an operator-centered target design. The 2026-08-30 lifecycle evaluation found
+that the web dashboard already supports investigation signals, impact preview, quarantine,
+automatic client recomposition, restoration, before/after health measurement, and retained
+intervention history. The installed CLI does not expose those mutations or the reproduce,
+repair, replace, and implementation-level verify commands proposed below. The web quarantine and
+restore dialogs also do not require an operator reason. Exact experiment evidence is recorded in
+`docs/polyform-lifecycle.md`.
 
 ## Identity and states
 

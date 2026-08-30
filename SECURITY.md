@@ -6,8 +6,9 @@ issues.
 
 ## Supported versions
 
-Only the most recent tagged release receives security fixes. Until v0.1.0 is published, the
-default branch is development software and must not be exposed directly to untrusted networks.
+Only the most recent tagged release receives security fixes. The current supported release is
+v0.1.2. Its HTTP/1.1-only restrictions and deployment guidance remain mandatory; do not expose a
+listener to untrusted networks without applying the documented network and process isolation.
 
 ## Reporting a vulnerability
 

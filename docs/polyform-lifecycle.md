@@ -1,7 +1,7 @@
 # Polyform lifecycle log
 
-This log distinguishes documented behavior from local workarounds. It will be finalized with
-publication, runtime composition, telemetry, dashboard, and remediation results.
+This log distinguishes documented behavior from local workarounds. The release, runtime,
+telemetry, dashboard, and remediation results below were finalized on 2026-08-30.
 
 ## Documentation and CLI
 
@@ -65,16 +65,15 @@ primary implementation per specified function. Polyguard's local agreement layer
 identity as the primary and add independently admitted local peers, preserving both server-driven
 population diversity and the proxy's minimum two-way interpretation rule.
 
-The authenticated operator dashboard was inspected against the existing `omalled/polyroute`
-project before Polyguard publication. It exposes release/source identity, composition population,
+The authenticated operator dashboard was first inspected against the existing
+`omalled/polyroute` project before Polyguard publication. It exposes release/source identity, composition population,
 per-function implementation counts, pairwise-risk signals, implementation-relative failure risk,
 confidence, status, source links, intervention history, recomposition counts, and an event stream.
 It correctly labels controlled simulator failures and preserves a prior quarantine/restore stage.
 On first load the telemetry API temporarily fell back to prominently labeled demonstration data;
 the same page then refreshed to live project data. Classification pending repetition: transient
 service/API availability behavior, not Polyguard evidence. No quarantine or restore control was
-activated during reconnaissance. Polyguard-specific findings will be recorded after its own
-success and labeled synthetic-failure exercises.
+activated during reconnaissance.
 
 ## Generation completion and diversity review
 
@@ -129,3 +128,59 @@ real HTTP/1.1 request with agreement width three. It then handled `SIGINT` with 
 connections and exit status zero. The temporary installation and test configuration were removed.
 An additional deterministic property suite covers 2,048 generated targets across all request-line
 and target implementations plus 1,024 generated duplicate-length framing cases.
+
+## Publication, clean install, and live telemetry
+
+The public project is `https://omalled.com/polyform/omalled/polyguard`; the public source is
+`https://github.com/omalled/polyform-polyguard`. GitHub Actions passed for release source commit
+`bd45c720ffe72054518df58a11e9bdab8d7791c1`. Polyform published that exact source and evidence as
+release 5 / version 0.1.2. GitHub release `v0.1.2` contains the executable, signed manifest,
+Polyform evidence, and checksum file. The final hashes are:
+
+- executable: `ab5d5e08e9ba2c867fd7dabc66c638c4fada873d3f8f1afbb67743d9968401fd`
+- manifest: `6d945018299d9cbe37b2565ee2cfff08017c8cfc1e32e0baa69e32dc2cccccec`
+- evidence: `1fd2107401979e03287bd629df81f92c056106f4476b7be4ee61179bf5acfefd`
+
+A clean `polyform install --version 0.1.2` produced an artifact matching the executable hash and a
+trust file bound to application `omalled/polyguard`, release 5, and version 0.1.2. Three distinct
+clean installations registered with `balanced`, `random`, and `homogeneous` strategies. Each
+proxied a real routed request as HTTP 200 and rejected an ordinary missing route as HTTP 404; all
+six executions reached hosted telemetry without reporting errors. The documented `stable`
+strategy was not used because the live registration API returned HTTP 422 and enumerated only
+`balanced`, `random`, and `homogeneous`.
+
+Live integration found and fixed two runtime/API contract mismatches before v0.1.2. First, the
+vendored client accepted `success`, `failure`, and `disagreement`, while the hosted endpoint
+accepted only `ok`, `error`, `timeout`, and `panic`; an isolated official-runtime request produced
+HTTP 422 and then succeeded after correction. Second, the endpoint rejects telemetry for locally
+invoked agreement peers not active in the signed server composition. Polyguard now truthfully
+reports only invoked server-active calls while retaining all local peer execution and fail-closed
+agreement behavior. Both defects have permanent regression tests. The CLI/runtime currently has
+no discovery or version-negotiation endpoint for these schemas; that is a platform integration
+risk rather than a proxy-protocol defect.
+
+## Labeled disagreement and reversible intervention
+
+No genuine implementation fault was found. A metadata-only isolated experiment therefore
+submitted explicitly labeled synthetic disagreement executions—never production traffic or user
+content—against implementation `upgrade-observation-policy-table` (`UOPT`). Thirty failures made
+the dashboard mark UOPT `Investigate` at 9.9x relative risk and 100% corrected confidence. The
+earlier five-event probe against `chunk-metadata-guarded-parts` remained below the confidence
+threshold and was not quarantined.
+
+The dashboard quarantine preview identified one affected client. Quarantine moved UOPT out of
+circulation; the client checked in at list version 2 / composition revision 2 and changed its
+`decide_upgrade` assignment to `upgrade-transformation-matrix`. The dashboard verified 1/1 clients
+recomposed. Ten explicitly labeled synthetic healthy controls then measured 100% healthy after
+quarantine versus the intentionally failure-heavy 7.3% synthetic baseline (+92.7 percentage
+points). This is experiment evidence, not a claim about real-world defect remediation.
+
+Restore returned UOPT to circulation for future assignments while correctly preserving the
+existing healthy replacement composition. A final check-in advanced the implementation list to
+version 3, retained revision 2, reported UOPT `active`, and reported no quarantined identities.
+The dashboard retains the intervention history and the synthetic risk signal; UOPT therefore
+remains advisory `Investigate`, not quarantined. The current web dashboard supports preview,
+quarantine, automatic recomposition, restoration, before/after measurement, and audit history.
+The installed CLI exposes none of those operator mutations, does not require a reason field in the
+web flow, and does not provide evidence-bundle reproduction or repair/replace commands; the target
+workflow in `docs/remediation-workflow-proposal.md` records those remaining product gaps.

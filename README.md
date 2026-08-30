@@ -21,7 +21,7 @@ curl --http1.1 -H 'Host: example.test' http://127.0.0.1:8080/
 
 The release executable supports one process, multiple named upstreams, exact-host and
 boundary-aware longest-path routing, explicit limits and deadlines, health/readiness endpoints,
-graceful shutdown, structured diagnostics, and privacy-safe outcome metrics. The final v0.1.0
+graceful shutdown, structured diagnostics, and privacy-safe outcome metrics. The v0.1.2
 release notes identify any feature (notably TLS or WebSocket tunneling) that remains deliberately
 unsupported and is therefore rejected.
 
@@ -57,11 +57,14 @@ guide. The signed server assignment chooses the primary implementation for each 
 Polyguard still executes the configured number of independent local peers and rejects disagreement.
 
 Fuzz seeds, raw-TCP tests, local upstream integration tests, clean-install checks, release
-checksums, and publication URLs are recorded with the release evidence.
+checksums, publication URLs, and the labeled quarantine/restore experiment are recorded in the
+[lifecycle log](docs/polyform-lifecycle.md). The public artifacts are in the
+[v0.1.2 GitHub release](https://github.com/omalled/polyform-polyguard/releases/tag/v0.1.2), and
+the live project is on the [Polyform dashboard](https://omalled.com/polyform/omalled/polyguard/dashboard).
 
 ## Current restrictions
 
 Polyguard is intentionally HTTP/1.1-only. It does not approximate HTTP/2, close-delimited
 request bodies, unsupported transfer codings, ambiguous pipelining, or incomplete upgrades.
-Connection reuse is not required for v0.1.0; canonical requests use `Connection: close` to keep
+Connection reuse is not required for v0.1.2; canonical requests use `Connection: close` to keep
 boundaries explicit. Consult the release notes before exposing a listener to untrusted networks.
