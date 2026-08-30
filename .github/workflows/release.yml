@@ -11,7 +11,7 @@ jobs:
   linux:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7.0.1
         with:
           ref: ${{ github.event.release.tag_name }}
       - uses: dtolnay/rust-toolchain@stable
@@ -21,10 +21,21 @@ jobs:
       - run: cargo test --all-targets --locked
       - run: cargo build --release --locked
       - name: Package and checksum
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          install -m 0755 target/release/polyguard polyguard-x86_64-unknown-linux-gnu
+          mkdir release-assets
+          gh release download "${{ github.event.release.tag_name }}" \
+            --pattern polyguard-aarch64-apple-darwin \
+            --pattern polyguard-manifest.json \
+            --pattern polyform-evidence.json \
+            --dir release-assets
+          install -m 0755 target/release/polyguard release-assets/polyguard-x86_64-unknown-linux-gnu
+          cd release-assets
           sha256sum polyguard-x86_64-unknown-linux-gnu > polyguard-x86_64-unknown-linux-gnu.sha256
+          sha256sum polyguard-aarch64-apple-darwin polyguard-x86_64-unknown-linux-gnu \
+            polyguard-manifest.json polyform-evidence.json > SHA256SUMS
       - name: Upload release assets
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release upload "${{ github.event.release.tag_name }}" polyguard-x86_64-unknown-linux-gnu polyguard-x86_64-unknown-linux-gnu.sha256 --clobber
+        run: gh release upload "${{ github.event.release.tag_name }}" release-assets/polyguard-x86_64-unknown-linux-gnu release-assets/polyguard-x86_64-unknown-linux-gnu.sha256 release-assets/SHA256SUMS --clobber

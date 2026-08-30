@@ -56,7 +56,9 @@ See [architecture](docs/architecture.md), [threat model](docs/threat-model.md),
 [protocol policy](docs/protocol-policy.md), [telemetry privacy](docs/telemetry-privacy.md), and the
 [operator guide](docs/operator-guide.md), plus the
 [Polyform lifecycle log](docs/polyform-lifecycle.md) and
-[implementation diversity review](docs/implementation-diversity.md). The complete deterministic contract with
+[implementation diversity review](docs/implementation-diversity.md). The
+[v0.2.0 production-readiness assessment](docs/production-readiness-v0.2.0.md) states the verified
+deployment envelope and limitations. The complete deterministic contract with
 standards citations and adversarial examples is [the Polyform specification](specs/polyform.toml).
 
 ## Development verification

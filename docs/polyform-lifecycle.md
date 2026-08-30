@@ -116,11 +116,11 @@ evidence-covered README, verification failed with `check evidence is stale`, the
 removed, and verification passed again. The signing key was generated with mode 0600 and remains
 under ignored `.polyform/` state.
 
-The local environment has no Docker executable and no `cargo audit` subcommand. Classification:
-environment capability, not project failure. The repository includes a multi-stage non-root
-Dockerfile, a CI container build/smoke job, Dependabot, a locked dependency graph, and strict Cargo
-checks. The standalone release artifact is tested directly; final reporting distinguishes local
-artifact smoke results from CI container availability.
+During the v0.1 assessment the local environment had no Docker executable or `cargo audit`
+subcommand. Classification: environment capability, not project failure. For v0.2, `cargo-audit`
+0.22.2 was installed and made a local, Polyform-evidence, release, and CI gate. The local host still
+has no Docker executable, but GitHub Actions built the multi-stage non-root image and ran its
+executable smoke test successfully on the exact release source.
 
 The optimized executable was copied with only a fresh configuration into a new temporary
 directory, started against a controlled loopback Python HTTP server, and successfully proxied a
@@ -184,3 +184,53 @@ quarantine, automatic recomposition, restoration, before/after measurement, and 
 The installed CLI exposes none of those operator mutations, does not require a reason field in the
 web flow, and does not provide evidence-bundle reproduction or repair/replace commands; the target
 workflow in `docs/remediation-workflow-proposal.md` records those remaining product gaps.
+
+## v0.2 production hardening and publication
+
+The post-v0.1.2 review found production-readiness gaps in TLS termination, aggregate memory
+accounting, telemetry/service latency isolation, management endpoint isolation, saturation-aware
+readiness, default connection limits, and release dependency auditing. Release 0.2.0 addresses
+those gaps with Rustls HTTPS, an aggregate request/response body budget, bounded asynchronous
+telemetry, background composition refresh, a separate optional management listener, explicit
+readiness capacity checks, lower connection limits, and an advisory audit gate. A platform-specific
+accepted-socket blocking-mode defect found by the overload test was also fixed permanently.
+
+The complete local release gate passed formatting, strict locked lints, RustSec audit against
+1,226 advisories, 55 normal tests, a 2,000-request concurrent soak, 13-function differential
+fuzzing, Polyform evidence generation/verification, and an optimized build. Native HTTPS was
+tested end to end with certificate hostname validation and HTTP/1.1 ALPN. GitHub Actions run
+`33337060059` independently passed the same source's Linux verification plus a real container
+build/smoke test. Release-artifact run `33337119380` independently audited, tested, and built the
+Linux binary before upload.
+
+The exact release source is commit `420880d9e71e9819f9a42031b51ff695c33b7943`. Polyform published
+it as release 6 / version 0.2.0. GitHub published tag `v0.2.0` with these verified SHA-256 values:
+
+- macOS ARM64 executable: `8a778a5376a20a8eeba86ed57ebfe7ddb88b61f96db08ee9f64dbb14823ac751`
+- Linux x86-64 executable: `96ecd72c2262ba120fe0fa147e2bae59635c046ecd4c7ddbc758d6f45cc4725a`
+- implementation manifest: `4a49e674d4b88601a828b5746682189f7a8bedffceeb0b07a63a436e8e22c922`
+- Polyform evidence: `19bca84b86a7c24f3ac2477c577a0a895484fbc0fb10d6026aba29aa10a68cda`
+- portable unified checksum file: `ac3d10395261d42bd54eef560b059c0e5239346b0481a6b8f1c10164c9b1039e`
+
+A second clean `polyform install --version 0.2.0` cryptographically verified release 6, produced a
+binary matching the macOS checksum, and wrote trust metadata bound to `omalled/polyguard`, release
+6, and version 0.2.0. With only a fresh configuration and disposable local certificate, that exact
+installed binary proxied a real HTTPS request to a controlled HTTP upstream, returned healthy and
+ready management status, reported zero disagreements/drops/failures with body memory returned to
+zero, and shut down gracefully with zero active connections.
+
+The first generated `SHA256SUMS` asset used build-directory prefixes and predated the asynchronous
+Linux upload. The asset was replaced with a portable basename-only list covering both executables,
+the manifest, and evidence; an independent clean download verified all four entries. The release
+workflow was then corrected to generate that unified file automatically. Classification: release
+packaging defect found and repaired before final reporting; published binaries were unchanged.
+
+The active v0.2 dashboard shows the correct release/source identity, 13 functions, 65
+implementations, 1.2 billion possible compositions, no quarantined implementations, and no active
+`Investigate` rows. An append-only false-positive resolution was recorded for UOPT while the page
+still showed the old synthetic experiment. On refresh, the dashboard switched to release 6 and the
+remaining v0.1.2 synthetic/exposure alerts became historical rather than active/actionable; the
+service exposes no release selector for adding resolution events to those old rows. A verified
+v0.2 installation then registered successfully with a signed balanced composition and proxied ten
+healthy HTTPS requests without local telemetry errors or dropped events. The synthetic installation
+identifier and runtime state remain only in ignored temporary state, not in the repository.
