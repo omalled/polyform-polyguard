@@ -1,7 +1,7 @@
 //! Bounded, fail-closed HTTP/1.1 reverse-proxy runtime.
 
 use std::cell::RefCell;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::Debug;
 use std::fs;
 use std::io::{self, Read, Write};
@@ -29,7 +29,7 @@ use crate::{
 const MAX_REQUEST_LINE_BYTES: usize = 8_192;
 const MAX_REQUEST_HEADER_BYTES: usize = 32_768;
 const MAX_TRAILER_BYTES: usize = 8_192;
-const SERVER_HEADER: &[u8] = b"server: polyguard/0.1.1\r\n";
+const SERVER_HEADER: &[u8] = b"server: polyguard/0.1.2\r\n";
 
 static TERMINATE: AtomicBool = AtomicBool::new(false);
 
@@ -578,6 +578,21 @@ fn take_trace() -> Vec<CallTelemetry> {
     CALL_TRACE.with(|trace| std::mem::take(&mut *trace.borrow_mut()))
 }
 
+fn active_composition_calls(
+    calls: &[CallTelemetry],
+    active: &HashMap<String, String>,
+) -> Vec<CallTelemetry> {
+    calls
+        .iter()
+        .filter(|call| {
+            active
+                .get(&call.spec_function)
+                .is_some_and(|implementation| implementation == &call.implementation_id)
+        })
+        .cloned()
+        .collect()
+}
+
 struct Metrics {
     accepted: AtomicU64,
     rejected: AtomicU64,
@@ -895,13 +910,14 @@ fn report_polyform(
         return;
     }
     let client = polyform.client.lock().expect("runtime lock poisoned");
+    let active_calls = active_composition_calls(calls, &client.composition.implementations);
     if client
         .report_execution(
             "proxy_request",
             success,
             duration_ms,
             (!success).then_some(outcome),
-            calls,
+            &active_calls,
         )
         .is_err()
     {
@@ -1697,5 +1713,26 @@ mod tests {
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].outcome, "error");
         assert!(["ok", "error", "timeout", "panic"].contains(&calls[0].outcome.as_str()));
+    }
+
+    #[test]
+    fn hosted_telemetry_reports_only_invoked_active_composition_members() {
+        let calls = vec![
+            CallTelemetry::new("parse_request_line", "request-line-state-pipeline", "ok"),
+            CallTelemetry::new("parse_request_line", "request-line-direct-guards", "ok"),
+            CallTelemetry::new("match_route", "route-direct-domain", "error"),
+        ];
+        let active = HashMap::from([
+            (
+                "parse_request_line".into(),
+                "request-line-state-pipeline".into(),
+            ),
+            ("match_route".into(), "route-direct-domain".into()),
+        ]);
+        let selected = active_composition_calls(&calls, &active);
+        assert_eq!(selected.len(), 2);
+        assert_eq!(selected[0].implementation_id, "request-line-state-pipeline");
+        assert_eq!(selected[1].implementation_id, "route-direct-domain");
+        assert_eq!(selected[1].outcome, "error");
     }
 }

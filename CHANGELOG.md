@@ -5,6 +5,13 @@ after the initial experimental release.
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-08-30
+
+### Fixed
+
+- Restrict hosted per-call telemetry to invoked members that are active in the signed server
+  composition, while keeping additional local agreement peers in the fail-closed execution set.
+
 ## [0.1.1] - 2026-08-30
 
 ### Fixed
