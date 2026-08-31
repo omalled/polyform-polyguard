@@ -571,7 +571,7 @@ dependencies = [
 
 [[package]]
 name = "polyform-polyguard"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "flate2",
  "polyform-runtime",

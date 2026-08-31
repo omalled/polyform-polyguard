@@ -5,6 +5,14 @@ after the initial experimental release.
 
 ## [Unreleased]
 
+## [0.3.3] - 2026-08-30
+
+### Fixed
+
+- Match Nginx `add_header` inheritance inside request-method conditions, coalescing exactly
+  equivalent inherited header sets and rejecting conditional overrides that cannot be represented
+  faithfully.
+
 ## [0.3.2] - 2026-08-30
 
 ### Fixed

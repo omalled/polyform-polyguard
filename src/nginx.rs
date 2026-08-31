@@ -822,8 +822,24 @@ impl Translator {
                             deny: Vec::new(),
                             action: conditional_action,
                         });
-                    } else {
-                        response_headers.extend(conditional_headers);
+                    } else if !conditional_headers.is_empty() {
+                        let faithfully_inherited = conditional_headers.len()
+                            == response_headers.len()
+                            && conditional_headers.iter().all(|conditional| {
+                                response_headers.iter().any(|inherited| {
+                                    inherited.name == conditional.name
+                                        && inherited.value == conditional.value
+                                        && inherited.always == conditional.always
+                                })
+                            });
+                        if response_headers.is_empty() {
+                            response_headers.extend(conditional_headers);
+                        } else if !faithfully_inherited {
+                            self.issue(
+                                child,
+                                "conditional add_header overrides cannot be represented unless they exactly match the inherited header set",
+                            );
+                        }
                     }
                 }
                 "root" | "alias" | "index" | "client_max_body_size" | "proxy_pass" => {
@@ -835,13 +851,11 @@ impl Translator {
 
         for route in &mut conditional_routes {
             let conditional_headers = std::mem::take(&mut route.response_headers);
-            route.response_headers = response_headers.clone();
-            for header in conditional_headers {
-                route
-                    .response_headers
-                    .retain(|inherited| inherited.name != header.name);
-                route.response_headers.push(header);
-            }
+            route.response_headers = if conditional_headers.is_empty() {
+                response_headers.clone()
+            } else {
+                conditional_headers
+            };
         }
 
         let explicit_return = action.is_some();
@@ -1636,6 +1650,47 @@ http {{
                     .iter()
                     .any(|route| matches!(route.action, RouteActionConfig::Proxy { .. }))
         }));
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn conditional_add_header_obeys_nginx_inheritance_without_duplicates() {
+        let directory = temporary_directory("conditional-header-inheritance");
+        let config_path = directory.join("nginx.conf");
+        fs::write(
+            &config_path,
+            r#"
+events {}
+http {
+    server {
+        listen 127.0.0.1:8080;
+        server_name app.example.test;
+        add_header Access-Control-Allow-Origin '*';
+        location / {
+            if ($request_method = 'GET') {
+                add_header Access-Control-Allow-Origin '*';
+            }
+            return 200 ok;
+        }
+    }
+}
+"#,
+        )
+        .unwrap();
+
+        let config = load_config(&config_path).unwrap();
+        let route = &config
+            .sites
+            .iter()
+            .find(|site| site.server_names == ["app.example.test"])
+            .unwrap()
+            .routes[0];
+        assert_eq!(route.response_headers.len(), 1);
+        assert_eq!(
+            route.response_headers[0].name,
+            "access-control-allow-origin"
+        );
+        assert!(route.response_headers[0].methods.is_empty());
         fs::remove_dir_all(directory).unwrap();
     }
 
