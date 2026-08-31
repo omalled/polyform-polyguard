@@ -5,6 +5,13 @@ after the initial experimental release.
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-08-30
+
+### Fixed
+
+- Publish a statically linked x86-64 Linux artifact and verify it on an older Linux userspace so
+  deployments are not coupled to the GitHub runner's glibc version.
+
 ## [0.3.0] - 2026-08-30
 
 ### Added

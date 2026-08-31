@@ -16,10 +16,17 @@ jobs:
           ref: ${{ github.event.release.tag_name }}
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - run: sudo apt-get update
+      - run: sudo apt-get install --yes musl-tools
+      - run: rustup target add x86_64-unknown-linux-musl
       - run: cargo install cargo-audit --locked
       - run: cargo audit
       - run: cargo test --all-targets --locked
       - run: cargo build --release --locked
+      - run: cargo build --release --locked --target x86_64-unknown-linux-musl --bin polyguard
+      - run: file target/x86_64-unknown-linux-musl/release/polyguard | grep --fixed-strings "statically linked"
+      - name: Smoke test portable binary on an older Linux userspace
+        run: docker run --rm --platform linux/amd64 --volume "$PWD/target/x86_64-unknown-linux-musl/release/polyguard:/polyguard:ro" ubuntu:18.04 /polyguard --help
       - name: Package and checksum
         env:
           GH_TOKEN: ${{ github.token }}
@@ -31,11 +38,14 @@ jobs:
             --pattern polyform-evidence.json \
             --dir release-assets
           install -m 0755 target/release/polyguard release-assets/polyguard-x86_64-unknown-linux-gnu
+          install -m 0755 target/x86_64-unknown-linux-musl/release/polyguard release-assets/polyguard-x86_64-unknown-linux-musl
           cd release-assets
           sha256sum polyguard-x86_64-unknown-linux-gnu > polyguard-x86_64-unknown-linux-gnu.sha256
+          sha256sum polyguard-x86_64-unknown-linux-musl > polyguard-x86_64-unknown-linux-musl.sha256
           sha256sum polyguard-aarch64-apple-darwin polyguard-x86_64-unknown-linux-gnu \
+            polyguard-x86_64-unknown-linux-musl \
             polyguard-manifest.json polyform-evidence.json > SHA256SUMS
       - name: Upload release assets
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release upload "${{ github.event.release.tag_name }}" release-assets/polyguard-x86_64-unknown-linux-gnu release-assets/polyguard-x86_64-unknown-linux-gnu.sha256 release-assets/SHA256SUMS --clobber
+        run: gh release upload "${{ github.event.release.tag_name }}" release-assets/polyguard-x86_64-unknown-linux-gnu release-assets/polyguard-x86_64-unknown-linux-gnu.sha256 release-assets/polyguard-x86_64-unknown-linux-musl release-assets/polyguard-x86_64-unknown-linux-musl.sha256 release-assets/SHA256SUMS --clobber

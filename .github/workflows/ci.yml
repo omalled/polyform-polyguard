@@ -30,3 +30,16 @@ jobs:
       - uses: actions/checkout@v7.0.1
       - run: docker build --tag polyguard:ci .
       - run: docker run --rm polyguard:ci --help
+
+  portable-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: dtolnay/rust-toolchain@stable
+      - run: sudo apt-get update
+      - run: sudo apt-get install --yes musl-tools
+      - run: rustup target add x86_64-unknown-linux-musl
+      - run: cargo build --release --locked --target x86_64-unknown-linux-musl --bin polyguard
+      - run: file target/x86_64-unknown-linux-musl/release/polyguard | grep --fixed-strings "statically linked"
+      - name: Smoke test on an older Linux userspace
+        run: docker run --rm --platform linux/amd64 --volume "$PWD/target/x86_64-unknown-linux-musl/release/polyguard:/polyguard:ro" ubuntu:18.04 /polyguard --help
