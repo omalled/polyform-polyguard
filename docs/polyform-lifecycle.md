@@ -250,3 +250,42 @@ reported zero drops, and the same hosted execution path was visibly proven durin
 lifecycle, so this is classified as a Polyform ingestion/dashboard freshness discrepancy rather
 than a Polyguard data-plane failure. Operators should not rely on the hosted dashboard as their
 only immediate v0.2 health signal; local readiness, counters, and structured logs remain required.
+
+## v0.3 Nginx migration release and publication
+
+Release 0.3.0 adds the fail-closed Nginx validation/import path, multiple HTTP and HTTPS listeners,
+exact and wildcard SNI certificates, deterministic typed actions, bounded static serving and gzip,
+sequential HTTP/1.1 keep-alive, and atomic SIGHUP reload. The local release gate passed 72 normal
+tests, strict warning-free lints, RustSec audit, a 2,000-request concurrent soak, deterministic
+differential fuzzing, Polyform evidence generation and verification, and an optimized build.
+
+The exact release source is commit `4bfde969c6e853e914b7f5d1c19f05fdd1fee57f`. GitHub release
+`v0.3.0` is pinned to that commit. Release-artifact workflow run `33344195057` independently passed
+the locked RustSec audit, all-target test suite, optimized Linux build, packaging, and asset upload.
+The published SHA-256 values are:
+
+- macOS ARM64 executable: `fb3c2aef56e66c396e484ca3b8e13550e18746d95f5c2e340716e90e0e8143de`
+- Linux x86-64 executable: `00852e803496e2f4ade1e3aae9f86e7661ef018773d53a18dffe608af0c3fbcd`
+- implementation manifest: `db1c6e4564e1aa4c4901d4003cf832b60f6054af94edf03ded5b0d82dad73247`
+- Polyform evidence: `8b13209430c3e4803b548cb6fef34bfee8c86e2c07330cab08e2a0d135292cdc`
+- portable unified checksum file: `bcacf1705a2982494a8781a02b9022856e73d7964fcedab1c73adbbda46ea4d5`
+
+An independent clean download verified every entry in `SHA256SUMS`; the downloaded manifest and
+evidence were byte-identical to the locally verified inputs. Polyform published the same artifact
+and evidence as release 7 / version 0.3.0. A fresh `polyform install --version 0.3.0`
+cryptographically verified release 7, produced the published macOS checksum, and wrote trust
+metadata bound to `omalled/polyguard`, release 7, and version 0.3.0.
+
+The freshly installed binary registered with a signed balanced composition and served eleven real
+HTTPS requests through a disposable `app.example.test` certificate and controlled loopback HTTP
+upstream. Certificate hostname validation, SNI routing, HTTP/1.1 ALPN, an HSTS response header,
+health/readiness isolation, and graceful shutdown all passed. Final local counters reported eleven
+accepted requests, zero rejections, disagreements, upstream failures, timeouts, or telemetry drops,
+and zero active connections or retained body bytes.
+
+The authenticated dashboard identified 0.3.0 as the active release, linked every implementation to
+the exact release commit, showed one active client and 100% healthy execution, and reflected the
+clean-install calls as zero-failure direct-call implementation executions. Its top-level telemetry
+event stream remained at zero because that stream is restricted to hard failures and composition
+changes; the per-implementation execution table was current and supplied the successful-call
+evidence that had been missing during the v0.2 observation.
