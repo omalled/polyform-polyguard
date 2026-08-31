@@ -5,6 +5,13 @@ after the initial experimental release.
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-08-30
+
+### Fixed
+
+- Resolve relative `include` directives from the root Nginx configuration prefix, matching Nginx
+  behavior for standard layouts where site files include shared root-level parameter files.
+
 ## [0.3.1] - 2026-08-30
 
 ### Fixed

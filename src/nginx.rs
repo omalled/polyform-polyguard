@@ -364,6 +364,7 @@ fn expand_include(pattern: &Path) -> Result<Vec<PathBuf>, NginxError> {
 }
 
 struct Loader {
+    prefix: PathBuf,
     stack: BTreeSet<PathBuf>,
     files: usize,
     total_bytes: usize,
@@ -371,12 +372,20 @@ struct Loader {
 
 impl Loader {
     fn load(path: &Path) -> Result<Vec<Directive>, NginxError> {
+        let canonical = fs::canonicalize(path).map_err(|source| NginxError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
         let mut loader = Self {
+            prefix: canonical
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .to_path_buf(),
             stack: BTreeSet::new(),
             files: 0,
             total_bytes: 0,
         };
-        loader.load_file(path, 0)
+        loader.load_file(&canonical, 0)
     }
 
     fn load_file(&mut self, path: &Path, depth: usize) -> Result<Vec<Directive>, NginxError> {
@@ -435,11 +444,7 @@ impl Loader {
                 let pattern = if requested.is_absolute() {
                     requested.to_path_buf()
                 } else {
-                    directive
-                        .path
-                        .parent()
-                        .unwrap_or_else(|| Path::new("."))
-                        .join(requested)
+                    self.prefix.join(requested)
                 };
                 for path in expand_include(&pattern)? {
                     expanded.extend(self.load_file(&path, depth + 1)?);
@@ -1597,6 +1602,40 @@ http {{
             panic!("expected compatibility issues");
         };
         assert!(issues.iter().any(|issue| issue.directive == "location"));
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn nested_relative_includes_use_the_root_configuration_prefix() {
+        let directory = temporary_directory("relative-include-prefix");
+        let sites = directory.join("sites-enabled");
+        fs::create_dir(&sites).unwrap();
+        fs::write(
+            directory.join("proxy_params"),
+            "proxy_set_header Host $host; proxy_set_header X-Real-IP $remote_addr;",
+        )
+        .unwrap();
+        fs::write(
+            sites.join("app.conf"),
+            "server { listen 127.0.0.1:8080; server_name app.example.test; location / { include proxy_params; proxy_pass http://127.0.0.1:3000; } }",
+        )
+        .unwrap();
+        let config_path = directory.join("nginx.conf");
+        fs::write(
+            &config_path,
+            "events {} http { include sites-enabled/*.conf; }",
+        )
+        .unwrap();
+
+        let config = load_config(&config_path).unwrap();
+        assert_eq!(config.upstreams.len(), 1);
+        assert!(config.sites.iter().any(|site| {
+            site.server_names == ["app.example.test"]
+                && site
+                    .routes
+                    .iter()
+                    .any(|route| matches!(route.action, RouteActionConfig::Proxy { .. }))
+        }));
         fs::remove_dir_all(directory).unwrap();
     }
 
