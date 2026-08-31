@@ -2015,6 +2015,7 @@ fn bind_listener(address: SocketAddr) -> io::Result<TcpListener> {
         Type::STREAM,
         Some(Protocol::TCP),
     )?;
+    socket.set_reuse_address(true)?;
     if address.is_ipv6() {
         // A literal IPv6 listener is IPv6-only. This both avoids surprising
         // IPv4-mapped traffic and permits imported Nginx configurations to
@@ -4436,6 +4437,7 @@ mod tests {
     #[test]
     fn explicit_ipv4_and_ipv6_wildcards_can_share_a_port() {
         let ipv4 = bind_listener("0.0.0.0:0".parse().unwrap()).unwrap();
+        assert!(socket2::SockRef::from(&ipv4).reuse_address().unwrap());
         let port = ipv4.local_addr().unwrap().port();
         let ipv6 = bind_listener(format!("[::]:{port}").parse().unwrap()).unwrap();
         assert!(socket2::SockRef::from(&ipv6).only_v6().unwrap());

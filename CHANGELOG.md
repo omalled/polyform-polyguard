@@ -5,6 +5,13 @@ after the initial experimental release.
 
 ## [Unreleased]
 
+## [0.3.8] - 2026-08-31
+
+### Fixed
+
+- Enable `SO_REUSEADDR` before binding traffic and management listeners so a production listener
+  can take over a recently closed address while prior connections finish their kernel lifecycle.
+
 ## [0.3.7] - 2026-08-31
 
 ### Fixed
