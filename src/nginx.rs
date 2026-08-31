@@ -678,7 +678,7 @@ impl Translator {
         } else {
             server.response_headers.clone()
         };
-        let mut request_headers = Vec::new();
+        let mut request_headers: Vec<HeaderValueConfig> = Vec::new();
         let mut deny = server.deny.clone();
         let mut max_request_body_bytes = server.max_request_body_bytes;
         let mut proxy = None;
@@ -729,7 +729,17 @@ impl Translator {
                     let value = child.args[1].clone();
                     match name.as_str() {
                         "host" if matches!(value.as_str(), "$host" | "$http_host") => {
-                            host_header = Some(value)
+                            if host_header
+                                .as_ref()
+                                .is_some_and(|existing| existing != &value)
+                            {
+                                self.issue(
+                                    child,
+                                    "conflicting duplicate Host proxy_set_header directives are unsupported",
+                                );
+                            } else {
+                                host_header = Some(value);
+                            }
                         }
                         "x-forwarded-for" if value == "$proxy_add_x_forwarded_for" => {}
                         "x-forwarded-proto" if value == "$scheme" => {}
@@ -738,12 +748,26 @@ impl Translator {
                             child,
                             "Forwarded is security-managed and cannot be overridden",
                         ),
-                        _ => request_headers.push(HeaderValueConfig {
-                            name,
-                            value,
-                            always: false,
-                            methods: Vec::new(),
-                        }),
+                        _ => {
+                            if let Some(existing) = request_headers
+                                .iter()
+                                .find(|existing| existing.name == name)
+                            {
+                                if existing.value != value {
+                                    self.issue(
+                                        child,
+                                        "conflicting duplicate proxy_set_header directives are unsupported",
+                                    );
+                                }
+                            } else {
+                                request_headers.push(HeaderValueConfig {
+                                    name,
+                                    value,
+                                    always: false,
+                                    methods: Vec::new(),
+                                });
+                            }
+                        }
                     }
                 }
                 "proxy_set_header" => {
@@ -1691,6 +1715,59 @@ http {
             "access-control-allow-origin"
         );
         assert!(route.response_headers[0].methods.is_empty());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn identical_proxy_set_headers_are_coalesced_but_conflicts_fail_closed() {
+        let directory = temporary_directory("duplicate-proxy-header");
+        fs::write(
+            directory.join("proxy_params"),
+            "proxy_set_header X-Real-IP $remote_addr;",
+        )
+        .unwrap();
+        let config_path = directory.join("nginx.conf");
+        fs::write(
+            &config_path,
+            r#"
+events {}
+http {
+    server {
+        listen 127.0.0.1:8080;
+        server_name app.example.test;
+        location / {
+            proxy_set_header X-Real-IP $remote_addr;
+            include proxy_params;
+            proxy_pass http://127.0.0.1:3000;
+        }
+    }
+}
+"#,
+        )
+        .unwrap();
+
+        let config = load_config(&config_path).unwrap();
+        let route = &config
+            .sites
+            .iter()
+            .find(|site| site.server_names == ["app.example.test"])
+            .unwrap()
+            .routes[0];
+        assert_eq!(route.request_headers.len(), 1);
+        assert_eq!(route.request_headers[0].name, "x-real-ip");
+
+        fs::write(
+            directory.join("proxy_params"),
+            "proxy_set_header X-Real-IP 192.0.2.1;",
+        )
+        .unwrap();
+        let error = load_config(&config_path).unwrap_err();
+        let NginxError::Unsupported(issues) = error else {
+            panic!("expected compatibility issues");
+        };
+        assert!(issues.iter().any(|issue| {
+            issue.directive == "proxy_set_header" && issue.message.contains("conflicting duplicate")
+        }));
         fs::remove_dir_all(directory).unwrap();
     }
 

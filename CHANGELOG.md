@@ -5,6 +5,13 @@ after the initial experimental release.
 
 ## [Unreleased]
 
+## [0.3.4] - 2026-08-30
+
+### Fixed
+
+- Coalesce byte-for-byte identical duplicate `proxy_set_header` directives during Nginx import,
+  while rejecting same-name directives with conflicting values.
+
 ## [0.3.3] - 2026-08-30
 
 ### Fixed
