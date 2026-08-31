@@ -24,7 +24,12 @@ jobs:
       - run: cargo test --all-targets --locked
       - run: cargo build --release --locked
       - run: cargo build --release --locked --target x86_64-unknown-linux-musl --bin polyguard
-      - run: file target/x86_64-unknown-linux-musl/release/polyguard | grep --fixed-strings "statically linked"
+      - name: Verify portable binary has no dynamic interpreter
+        run: |
+          file target/x86_64-unknown-linux-musl/release/polyguard
+          if readelf --program-headers target/x86_64-unknown-linux-musl/release/polyguard | grep --quiet "Requesting program interpreter"; then
+            exit 1
+          fi
       - name: Smoke test portable binary on an older Linux userspace
         run: docker run --rm --platform linux/amd64 --volume "$PWD/target/x86_64-unknown-linux-musl/release/polyguard:/polyguard:ro" ubuntu:18.04 /polyguard --help
       - name: Package and checksum

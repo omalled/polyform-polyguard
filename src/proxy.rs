@@ -3167,7 +3167,7 @@ fn client_accepts_gzip(headers: &HeaderBlock) -> bool {
 }
 
 fn parse_quality(value: &str) -> Option<u16> {
-    let (whole, fraction) = value.split_once('.').map_or((value, ""), |parts| parts);
+    let (whole, fraction) = value.split_once('.').unwrap_or((value, ""));
     if fraction.len() > 3 || !fraction.bytes().all(|byte| byte.is_ascii_digit()) {
         return None;
     }
