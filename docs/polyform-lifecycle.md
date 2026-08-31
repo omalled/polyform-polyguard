@@ -289,3 +289,27 @@ clean-install calls as zero-failure direct-call implementation executions. Its t
 event stream remained at zero because that stream is restricted to hard failures and composition
 changes; the per-implementation execution table was current and supplied the successful-call
 evidence that had been missing during the v0.2 observation.
+
+## v0.3.5 bounded expectation repair and publication
+
+Release 0.3.5 adds bounded client-side `Expect: 100-continue` handling, checks declared body limits
+before route actions or interim responses, and preserves Nginx missing-static-resource precedence.
+The changes are confined to the proxy coordinator; no typed Polyform function contract or
+independent implementation changed. The complete local release gate passed 77 normal tests, the
+2,000-request soak, strict warning-free lints, the RustSec audit, differential fuzzing, evidence
+generation/verification, and an optimized build. A controlled loopback regression confirmed
+matching status behavior for oversized, missing, existing-static, and proxied expectation cases.
+
+The exact release source is commit `5f98f679cbdf6574b81ee997c0d8f5d417cbdfe2`. GitHub Actions run
+`33349535598` passed source verification, container smoke, portable static Linux construction, and
+an older-userspace smoke test. Release-artifact run `33349649631` independently audited, tested,
+built, smoke-tested, checksummed, and uploaded the artifacts. GitHub release `v0.3.5` and Polyform
+release 12 / version 0.3.5 publish that same source and evidence. An independent clean download
+verified the unified checksum set:
+
+- macOS ARM64 executable: `c029149e7e9d672d59b324636a7e1504537e3f321ca3dc6104338aa50c56ce46`
+- GNU Linux x86-64 executable: `457b80a4bd6248ec6dc1482eb633e365b78a5736f428adc5953842afb1f9ff78`
+- static Linux x86-64 executable: `5e66141fd76f8c44970fded2749b468cfe23d93ed771ac02b581dabc3ab31617`
+- implementation manifest: `9024a116fe3ff630c26e56b5f947642c7ff0958b6da78f092e8ffb8c8f76fa5a`
+- Polyform evidence: `c88a35b7ba1edcb51e5f20f6c104f77b59ea95e17f5cf2e95ab8a525de5dbfa8`
+- portable unified checksum file: `611e8423ee8e07bba324991e8a131bb9aba0a5f36e3a4b11140983dbfe0fbbe0`

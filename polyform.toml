@@ -2,7 +2,7 @@ schema_version = 1
 
 [project]
 name = "polyform-polyguard"
-version = "0.3.5"
+version = "0.3.6"
 repository = "https://github.com/omalled/polyform-polyguard"
 spec_paths = ["specs/polyform.toml"]
 source_paths = ["Cargo.toml", "Cargo.lock", "src", "tests", "fuzz/counterexamples", "vendor/polyform-runtime", ".github", "Dockerfile", "polyguard.example.toml", "polyguard.https.example.toml", "polyguard.multi-site.example.toml", "packaging", "scripts", "README.md", "CHANGELOG.md", "SECURITY.md", "LICENSE", "docs"]

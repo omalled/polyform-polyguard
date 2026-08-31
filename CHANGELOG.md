@@ -5,6 +5,14 @@ after the initial experimental release.
 
 ## [Unreleased]
 
+## [0.3.6] - 2026-08-30
+
+### Fixed
+
+- Allow the hardened systemd unit to read imported static roots under `/home` while preserving a
+  read-only filesystem view, and document least-privilege certificate-key access for an
+  unprivileged service account.
+
 ## [0.3.5] - 2026-08-30
 
 ### Added

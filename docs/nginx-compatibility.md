@@ -79,3 +79,8 @@ requesting a reload. The systemd unit repeats validation as the unprivileged `po
 before signaling the running process, so renewal fails safely if that account cannot read a new
 key. Grant only that account (or a dedicated certificate-reader group) read access to deployed
 private keys; do not make keys world-readable.
+
+The packaged service exposes `/home` read-only for imported static roots. If the Nginx master
+currently relies on root-only certificate access, grant the unprivileged Polyguard account narrow
+reader access through a dedicated certificate group and inheritable ACLs as described in the
+operator guide.

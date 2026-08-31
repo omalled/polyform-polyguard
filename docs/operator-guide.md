@@ -111,6 +111,26 @@ The parser fails closed with source locations for unsupported behavior. The exac
 reload rules, systemd unit, and certificate-renewal hook are in `nginx-compatibility.md` and
 `packaging/`.
 
+The packaged unit exposes home directories read-only so an imported `root` or `alias` under
+`/home` can be served without granting Polyguard write access. Ordinary Unix traversal and file
+read permissions still apply.
+
+Keep the service unprivileged when Nginx's certificate paths are root-readable. On Debian or
+Ubuntu, use the dedicated `ssl-cert` group plus access and inheritable ACLs rather than making
+private keys world-readable:
+
+```sh
+usermod --append --groups ssl-cert polyguard
+setfacl --recursive --modify group:ssl-cert:rX /etc/letsencrypt/live /etc/letsencrypt/archive
+find /etc/letsencrypt/live /etc/letsencrypt/archive -type d \
+  -exec setfacl --modify default:group:ssl-cert:rX {} +
+```
+
+Restart the service after changing supplementary groups. The default ACL lets future renewal
+files inherit the same narrow reader access; the deploy hook still validates every renewed key
+and certificate before reloading. Use an equivalently dedicated group on systems without
+`ssl-cert`.
+
 ## Incident response
 
 If disagreement telemetry appears, preserve only the synthetic or already-sanitized reproducer,
