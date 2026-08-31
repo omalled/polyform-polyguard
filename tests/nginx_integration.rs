@@ -1,6 +1,6 @@
 use std::fs;
 use std::io::{Read, Write};
-use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
+use std::net::{Ipv6Addr, Shutdown, SocketAddr, SocketAddrV6, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
@@ -75,6 +75,44 @@ fn send(address: SocketAddr, request: &[u8]) -> Vec<u8> {
     let mut response = Vec::new();
     stream.read_to_end(&mut response).unwrap();
     response
+}
+
+#[test]
+fn nginx_explicit_ipv4_and_ipv6_wildcards_share_listener_ports() {
+    let directory = temporary_directory("dual-stack");
+    let reservation = TcpListener::bind("0.0.0.0:0").unwrap();
+    let port = reservation.local_addr().unwrap().port();
+    drop(reservation);
+    let config = directory.join("nginx.conf");
+    fs::write(
+        &config,
+        format!(
+            r#"
+events {{}}
+http {{
+    server {{
+        listen 0.0.0.0:{port};
+        listen [::]:{port} ipv6only=on;
+        server_name dual-stack.example.test;
+        return 200 dual-stack;
+    }}
+}}
+"#,
+        ),
+    )
+    .unwrap();
+
+    let ipv4_address: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+    let _process = start(&config, ipv4_address);
+    let ipv6_address = SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::LOCALHOST, port, 0, 0));
+    for address in [ipv4_address, ipv6_address] {
+        let response = send(
+            address,
+            b"GET / HTTP/1.1\r\nHost: dual-stack.example.test\r\nConnection: close\r\n\r\n",
+        );
+        assert!(response.starts_with(b"HTTP/1.1 200 OK"), "{response:?}");
+        assert!(response.ends_with(b"dual-stack"), "{response:?}");
+    }
 }
 
 fn read_request(stream: &mut TcpStream) -> Vec<u8> {

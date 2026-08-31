@@ -1,6 +1,6 @@
 [package]
 name = "polyform-polyguard"
-version = "0.3.6"
+version = "0.3.7"
 edition = "2024"
 
 [dependencies]
@@ -10,6 +10,7 @@ toml = "0.8"
 flate2 = "1"
 polyform-runtime = { path = "vendor/polyform-runtime" }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+socket2 = "0.6"
 
 [dev-dependencies]
 rcgen = "0.14"

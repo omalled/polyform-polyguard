@@ -5,6 +5,13 @@ after the initial experimental release.
 
 ## [Unreleased]
 
+## [0.3.7] - 2026-08-31
+
+### Fixed
+
+- Bind literal IPv6 listeners with `IPV6_V6ONLY`, allowing imported Nginx configurations with
+  explicit IPv4 and IPv6 wildcard listeners to use the same port without self-collision.
+
 ## [0.3.6] - 2026-08-30
 
 ### Fixed

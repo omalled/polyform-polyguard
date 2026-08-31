@@ -22,6 +22,7 @@ use rustls::sign::CertifiedKey;
 use rustls::{ServerConfig, ServerConnection, StreamOwned};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use socket2::{Domain, Protocol, Socket, Type};
 
 use polyform_runtime::{
     CallTelemetry, Client as PolyformClient, ImplementationInventory, ReleaseTrust,
@@ -1793,12 +1794,12 @@ fn run_inner(config: Config, reload_loader: Option<ReloadLoader>) -> io::Result<
     let listeners = listener_addresses
         .into_iter()
         .map(|address| {
-            let socket = TcpListener::bind(address)?;
+            let socket = bind_listener(address)?;
             socket.set_nonblocking(true)?;
             Ok(BoundListener { address, socket })
         })
         .collect::<io::Result<Vec<_>>>()?;
-    let management_listener = management_address.map(TcpListener::bind).transpose()?;
+    let management_listener = management_address.map(bind_listener).transpose()?;
     if let Some(listener) = &management_listener {
         listener.set_nonblocking(true)?;
     }
@@ -2006,6 +2007,23 @@ fn run_inner(config: Config, reload_loader: Option<ReloadLoader>) -> io::Result<
         json!({"event":"stopped","active_connections":metrics.active.load(Ordering::Relaxed)}),
     );
     Ok(())
+}
+
+fn bind_listener(address: SocketAddr) -> io::Result<TcpListener> {
+    let socket = Socket::new(
+        Domain::for_address(address),
+        Type::STREAM,
+        Some(Protocol::TCP),
+    )?;
+    if address.is_ipv6() {
+        // A literal IPv6 listener is IPv6-only. This both avoids surprising
+        // IPv4-mapped traffic and permits imported Nginx configurations to
+        // bind explicit 0.0.0.0 and [::] listeners on the same port.
+        socket.set_only_v6(true)?;
+    }
+    socket.bind(&address.into())?;
+    socket.listen(128)?;
+    Ok(socket.into())
 }
 
 fn route_rules(config: &Config) -> Vec<RouteRule> {
@@ -4414,6 +4432,15 @@ mod tests {
     use super::*;
     use flate2::read::GzDecoder;
     use rcgen::{CertifiedKey, generate_simple_self_signed};
+
+    #[test]
+    fn explicit_ipv4_and_ipv6_wildcards_can_share_a_port() {
+        let ipv4 = bind_listener("0.0.0.0:0".parse().unwrap()).unwrap();
+        let port = ipv4.local_addr().unwrap().port();
+        let ipv6 = bind_listener(format!("[::]:{port}").parse().unwrap()).unwrap();
+        assert!(socket2::SockRef::from(&ipv6).only_v6().unwrap());
+        assert_eq!(ipv6.local_addr().unwrap().port(), port);
+    }
 
     #[test]
     fn declared_body_limit_is_enforced_before_action_handling() {

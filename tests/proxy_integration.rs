@@ -84,7 +84,12 @@ fn start_proxy_with_options(
         proxy.port()
     ));
     fs::create_dir(&directory).unwrap();
-    let management = free_address();
+    let management = loop {
+        let candidate = free_address();
+        if candidate != proxy && candidate != upstream {
+            break candidate;
+        }
+    };
     let tls_section = if let Some((certificate, private_key)) = tls_pem {
         let certificate_path = directory.join("certificate.pem");
         let private_key_path = directory.join("private-key.pem");
@@ -134,7 +139,7 @@ upstream = "app"
         ),
     )
     .unwrap();
-    let child = Command::new(env!("CARGO_BIN_EXE_polyguard"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_polyguard"))
         .args(["--config", config.to_str().unwrap()])
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -142,10 +147,20 @@ upstream = "app"
         .unwrap();
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
-        if TcpStream::connect(proxy).is_ok() {
+        if TcpStream::connect(proxy).is_ok() && TcpStream::connect(management).is_ok() {
             break;
         }
-        assert!(Instant::now() < deadline, "proxy did not start");
+        if let Some(status) = child.try_wait().unwrap() {
+            let mut stderr = String::new();
+            if let Some(mut pipe) = child.stderr.take() {
+                pipe.read_to_string(&mut stderr).unwrap();
+            }
+            panic!("proxy exited during startup with {status}: {stderr}");
+        }
+        assert!(
+            Instant::now() < deadline,
+            "proxy and management listeners did not start"
+        );
         thread::sleep(Duration::from_millis(10));
     }
     ProxyProcess {

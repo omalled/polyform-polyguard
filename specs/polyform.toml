@@ -1,6 +1,6 @@
 schema_version = 1
 application = "polyform-polyguard"
-release = "0.3.6"
+release = "0.3.7"
 purpose = """
 Polyguard is a security-first HTTP/1.1 reverse proxy. These bounded deterministic functions are the interpretation and policy core used by the real network service. The proxy compares typed results from independently selected implementations and rejects and closes on disagreement. Functions perform no network, filesystem, clock, random, locale, DNS, TLS, logging, or process-global operations; do not recurse in proportion to input; and terminate in O(input plus collection size), except stated sorting. Limits are inclusive and checked before proportional allocation.
 
