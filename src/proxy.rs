@@ -1097,6 +1097,7 @@ enum Fault {
     Timeout,
     UpstreamTimeout,
     TooLarge,
+    ExpectationFailed,
     Busy,
     Forbidden,
     ClientClosed,
@@ -1117,7 +1118,9 @@ impl Fault {
             Self::Protocol(
                 PolyguardError::UnsupportedUpgrade | PolyguardError::UnsupportedVersion,
             ) => "policy_rejected",
-            Self::Protocol(_) | Self::ClientIo | Self::TooLarge => "client_syntax",
+            Self::Protocol(_) | Self::ClientIo | Self::TooLarge | Self::ExpectationFailed => {
+                "client_syntax"
+            }
             Self::ClientClosed => "client_closed",
             Self::Busy => "overloaded",
             Self::Forbidden => "policy_rejected",
@@ -1137,6 +1140,7 @@ impl Fault {
             Self::TooLarge | Self::Protocol(PolyguardError::LimitExceeded { .. }) => {
                 (413, "Content Too Large")
             }
+            Self::ExpectationFailed => (417, "Expectation Failed"),
             Self::Busy => (503, "Service Unavailable"),
             Self::Forbidden => (403, "Forbidden"),
             Self::Upstream => (502, "Bad Gateway"),
@@ -2726,9 +2730,6 @@ fn process_request(
     }
     let accepts_gzip = client_accepts_gzip(&headers);
     let request_keep_alive = client_allows_keep_alive(&headers);
-    if has_header(&headers, "expect") {
-        return Err(Fault::Protocol(PolyguardError::UnsupportedUpgrade));
-    }
     let framing = runtime
         .agreement
         .run("determine_body_framing", |implementation| {
@@ -2736,6 +2737,7 @@ fn process_request(
                 .determine_body_framing
                 .map(|function| function(&request, &headers))
         })?;
+    let expect_continue = parse_expect_continue(&headers)?;
     let target = runtime
         .agreement
         .run("normalize_request_target", |implementation| {
@@ -2764,6 +2766,7 @@ fn process_request(
                 .remove_hop_by_hop_headers
                 .map(|function| function(&headers))
         })?;
+    sanitized.fields.retain(|field| field.name != "expect");
     let upgrade = runtime.agreement.run("decide_upgrade", |implementation| {
         implementation
             .decide_upgrade
@@ -2775,6 +2778,7 @@ fn process_request(
 
     let scheme = if stream.is_tls() { "https" } else { "http" };
     let route = select_runtime_route(runtime, &authority, &target, &request.method, scheme)?;
+    enforce_declared_body_limit(&framing, route.max_request_body_bytes)?;
     if route.deny.iter().any(|network| network.contains(peer.ip())) {
         return Err(Fault::Forbidden);
     }
@@ -2918,6 +2922,11 @@ fn process_request(
         }
         RuntimeAction::Proxy { .. } => {}
     }
+    if expect_continue && framing != BodyFraming::None {
+        stream
+            .write_all(b"HTTP/1.1 100 Continue\r\n\r\n")
+            .map_err(|_| Fault::ClientIo)?;
+    }
     apply_request_headers(
         &mut sanitized,
         &route.request_headers,
@@ -3001,8 +3010,33 @@ fn process_request(
     Ok(request_keep_alive)
 }
 
-fn has_header(headers: &HeaderBlock, name: &str) -> bool {
-    headers.fields.iter().any(|field| field.name == name)
+fn parse_expect_continue(headers: &HeaderBlock) -> std::result::Result<bool, Fault> {
+    let mut values = headers
+        .fields
+        .iter()
+        .filter(|field| field.name == "expect")
+        .map(|field| field.value.trim_ascii());
+    let Some(value) = values.next() else {
+        return Ok(false);
+    };
+    if values.next().is_some() || !value.eq_ignore_ascii_case(b"100-continue") {
+        return Err(Fault::ExpectationFailed);
+    }
+    Ok(true)
+}
+
+fn enforce_declared_body_limit(
+    framing: &BodyFraming,
+    max_request_body_bytes: usize,
+) -> std::result::Result<(), Fault> {
+    if let BodyFraming::ContentLength(length) = framing
+        && usize::try_from(*length)
+            .map(|length| length > max_request_body_bytes)
+            .unwrap_or(true)
+    {
+        return Err(Fault::TooLarge);
+    }
+    Ok(())
 }
 
 fn authority_string(authority: &EffectiveAuthority) -> String {
@@ -3451,27 +3485,7 @@ fn read_static_file(
     max_bytes: usize,
     budget: &Arc<MemoryBudget>,
 ) -> std::result::Result<Option<(PathBuf, BufferedBody)>, Fault> {
-    let Ok(resolved) = fs::canonicalize(candidate) else {
-        return Ok(None);
-    };
-    if !resolved.starts_with(root) {
-        return Ok(None);
-    }
-    let file = if resolved.is_dir() {
-        if !try_files {
-            return Ok(None);
-        }
-        let Some(file) = indexes.iter().find_map(|index| {
-            let indexed = resolved.join(index);
-            let canonical = fs::canonicalize(indexed).ok()?;
-            (canonical.starts_with(root) && canonical.is_file()).then_some(canonical)
-        }) else {
-            return Ok(None);
-        };
-        file
-    } else if resolved.is_file() {
-        resolved
-    } else {
+    let Some(file) = resolve_static_file(root, candidate, indexes, try_files) else {
         return Ok(None);
     };
     let Ok(opened) = fs::File::open(&file) else {
@@ -3505,6 +3519,35 @@ fn read_static_file(
     )))
 }
 
+fn resolve_static_file(
+    root: &Path,
+    candidate: &Path,
+    indexes: &[String],
+    try_files: bool,
+) -> Option<PathBuf> {
+    let Ok(resolved) = fs::canonicalize(candidate) else {
+        return None;
+    };
+    if !resolved.starts_with(root) {
+        return None;
+    }
+    let file = if resolved.is_dir() {
+        if !try_files {
+            return None;
+        }
+        indexes.iter().find_map(|index| {
+            let indexed = resolved.join(index);
+            let canonical = fs::canonicalize(indexed).ok()?;
+            (canonical.starts_with(root) && canonical.is_file()).then_some(canonical)
+        })?
+    } else if resolved.is_file() {
+        resolved
+    } else {
+        return None;
+    };
+    Some(file)
+}
+
 fn serve_static(
     route: &RuntimeRoute,
     target: &NormalizedTarget,
@@ -3523,7 +3566,18 @@ fn serve_static(
     else {
         return Err(Fault::Internal);
     };
-    if !matches!(method, "get" | "head") {
+    let relative = match mapping {
+        StaticMapping::Root => target.routing_path.trim_start_matches('/'),
+        StaticMapping::Alias => target
+            .routing_path
+            .strip_prefix(&route.path)
+            .ok_or(Fault::Internal)?
+            .trim_start_matches('/'),
+    };
+    let candidate = static_candidate(directory, relative).ok_or(Fault::Internal)?;
+    if !matches!(method, "get" | "head")
+        && resolve_static_file(directory, &candidate, index, *try_files).is_some()
+    {
         let body = b"method not allowed\n".to_vec();
         return Ok(StaticResponse {
             status: 405,
@@ -3535,15 +3589,6 @@ fn serve_static(
             headers: Vec::new(),
         });
     }
-    let relative = match mapping {
-        StaticMapping::Root => target.routing_path.trim_start_matches('/'),
-        StaticMapping::Alias => target
-            .routing_path
-            .strip_prefix(&route.path)
-            .ok_or(Fault::Internal)?
-            .trim_start_matches('/'),
-    };
-    let candidate = static_candidate(directory, relative).ok_or(Fault::Internal)?;
     if let Some((path, mut body)) =
         read_static_file(directory, &candidate, index, *try_files, max_bytes, budget)?
     {
@@ -4369,6 +4414,77 @@ mod tests {
     use super::*;
     use flate2::read::GzDecoder;
     use rcgen::{CertifiedKey, generate_simple_self_signed};
+
+    #[test]
+    fn declared_body_limit_is_enforced_before_action_handling() {
+        assert!(matches!(
+            enforce_declared_body_limit(&BodyFraming::ContentLength(5), 4),
+            Err(Fault::TooLarge)
+        ));
+        assert!(enforce_declared_body_limit(&BodyFraming::ContentLength(4), 4).is_ok());
+        assert!(enforce_declared_body_limit(&BodyFraming::Chunked, 4).is_ok());
+    }
+
+    #[test]
+    fn missing_static_resource_wins_over_method_rejection() {
+        let directory = std::env::temp_dir().join(format!(
+            "polyguard-static-method-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir(&directory).unwrap();
+        fs::write(directory.join("index.html"), b"ok").unwrap();
+        let directory = fs::canonicalize(&directory).unwrap();
+        let route = RuntimeRoute {
+            id: "static".into(),
+            host: "example.test".into(),
+            path: "/".into(),
+            match_kind: RouteMatchKind::Prefix,
+            methods: Vec::new(),
+            schemes: Vec::new(),
+            max_request_body_bytes: 1_024,
+            request_headers: Vec::new(),
+            response_headers: Vec::new(),
+            deny: Vec::new(),
+            action: RuntimeAction::Static {
+                directory: directory.clone(),
+                mapping: StaticMapping::Root,
+                index: vec!["index.html".into()],
+                try_files: true,
+                error_page_404: None,
+            },
+            declaration_order: 0,
+        };
+        let target = |path: &str| NormalizedTarget {
+            form: TargetForm::Origin,
+            scheme: None,
+            authority: None,
+            path_and_query: path.into(),
+            routing_path: path.into(),
+        };
+        let headers = HeaderBlock {
+            fields: Vec::new(),
+            bytes_consumed: 0,
+        };
+        let budget = MemoryBudget::new(1_024);
+        let existing =
+            serve_static(&route, &target("/"), "post", &headers, 1_024, &budget).unwrap();
+        assert_eq!(existing.status, 405);
+        let missing = serve_static(
+            &route,
+            &target("/missing"),
+            "post",
+            &headers,
+            1_024,
+            &budget,
+        )
+        .unwrap();
+        assert_eq!(missing.status, 404);
+        fs::remove_dir_all(directory).unwrap();
+    }
 
     #[test]
     fn response_framing_rejects_te_and_content_length() {

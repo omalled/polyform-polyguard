@@ -14,6 +14,9 @@ limits, examples, and error precedence are in `specs/polyform.toml`.
   coding with strictly parsed chunks and declared bounded trailers (RFC 9112 §§6–7.1).
 - One effective authority whose target and `Host` representations agree after default-port
   normalization (RFC 9110 §7.2; RFC 9112 §3.2).
+- A single case-insensitive `Expect: 100-continue` request. After authority, route, framing, and
+  declared body-size validation, proxy routes receive one bounded interim response before the
+  body is read. The consumed expectation is never forwarded upstream.
 
 ## Rejected requests
 
@@ -25,8 +28,7 @@ limits, examples, and error precedence are in `specs/polyform.toml`.
   traversal above root, userinfo, invalid ports, unbracketed IPv6, and authority/Host mismatch.
 - Undeclared, duplicate, or security-sensitive trailer fields.
 - Unsupported upgrades and incomplete WebSocket handshakes.
-- `Expect: 100-continue` in this release; the runtime does not implement the
-  documented bounded handshake. It is never silently forwarded before a body decision.
+- Repeated expectations and every expectation other than `100-continue`.
 - Pipelined bytes. A client may send the next request only after receiving the previous response;
   unexpected bytes behind a framed request are rejected as ambiguous.
 
@@ -42,10 +44,11 @@ verify the same typed meaning.
 
 Polyguard returns `400 Bad Request` for syntax and framing rejection, `404 Not Found` for no
 route, `413 Content Too Large` for body/metadata limits where appropriate, `416 Range Not
-Satisfiable` for an invalid supported static range, `501 Not Implemented` for upgrade intent,
-`502 Bad Gateway` for upstream failures, and `504 Gateway Timeout` for upstream deadlines. A
-disagreement uses a generic `400` and closes without exposing implementation details to the
-client.
+Satisfiable` for an invalid supported static range, `417 Expectation Failed` for unsupported
+expectations, `501 Not Implemented` for upgrade intent, `502 Bad Gateway` for upstream failures,
+and `504 Gateway Timeout` for upstream deadlines. A disagreement uses a generic `400` and closes
+without exposing implementation details to the client.
 
 Upstream informational (`1xx`) responses are rejected with `502`; this release does not implement
-an informational-response state machine and never treats an interim response as terminal.
+an upstream informational-response state machine and never treats an upstream interim response as
+terminal. The bounded client-side `100 Continue` response described above is generated locally.

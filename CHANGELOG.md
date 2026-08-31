@@ -5,6 +5,20 @@ after the initial experimental release.
 
 ## [Unreleased]
 
+## [0.3.5] - 2026-08-30
+
+### Added
+
+- Complete the bounded `Expect: 100-continue` handshake for accepted request bodies, consume the
+  expectation before forwarding, and reject unsupported expectations with `417`.
+
+### Fixed
+
+- Reject a declared body larger than the selected route limit before action handling or an interim
+  response.
+- Preserve Nginx static-route precedence by returning `404` for a missing resource before applying
+  the existing-resource method rejection.
+
 ## [0.3.4] - 2026-08-30
 
 ### Fixed

@@ -541,10 +541,83 @@ fn health_metrics_and_body_limit_are_operational() {
         b"POST / HTTP/1.1\r\nHost: example.test\r\nContent-Length: 5\r\n\r\n12345",
     );
     assert!(oversized.starts_with(b"HTTP/1.1 413"), "{oversized:?}");
+    let expected_oversized = send(
+        proxy_address,
+        b"POST / HTTP/1.1\r\nHost: example.test\r\nExpect: 100-continue\r\nContent-Length: 5\r\n\r\n",
+    );
+    assert!(
+        expected_oversized.starts_with(b"HTTP/1.1 413"),
+        "{expected_oversized:?}"
+    );
+    assert!(
+        !expected_oversized.starts_with(b"HTTP/1.1 100"),
+        "oversized request received an interim response: {expected_oversized:?}"
+    );
     upstream.set_nonblocking(true).unwrap();
     assert!(
         upstream.accept().is_err(),
         "oversized body reached upstream"
+    );
+}
+
+#[test]
+fn expect_continue_handshake_is_completed_and_consumed_before_forwarding() {
+    let upstream = TcpListener::bind("127.0.0.1:0").unwrap();
+    let proxy_address = free_address();
+    let _proxy = start_proxy(proxy_address, upstream.local_addr().unwrap(), 1_024);
+    let server = thread::spawn(move || {
+        let (mut stream, _) = upstream.accept().unwrap();
+        let request = read_request(&mut stream);
+        let text = String::from_utf8_lossy(&request).to_ascii_lowercase();
+        assert!(!text.contains("expect:"), "{text}");
+        assert!(request.ends_with(b"\r\n\r\nbody"), "{request:?}");
+        stream
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+            .unwrap();
+    });
+
+    let mut client = TcpStream::connect(proxy_address).unwrap();
+    client
+        .set_read_timeout(Some(Duration::from_secs(3)))
+        .unwrap();
+    client
+        .write_all(
+            b"POST / HTTP/1.1\r\nHost: example.test\r\nExpect: 100-Continue\r\nContent-Length: 4\r\n\r\n",
+        )
+        .unwrap();
+    let expected = b"HTTP/1.1 100 Continue\r\n\r\n";
+    let mut interim = vec![0; expected.len()];
+    client.read_exact(&mut interim).unwrap();
+    assert_eq!(interim, expected);
+    client.write_all(b"body").unwrap();
+    client.shutdown(Shutdown::Write).unwrap();
+    let mut final_response = Vec::new();
+    client.read_to_end(&mut final_response).unwrap();
+    assert!(
+        final_response.starts_with(b"HTTP/1.1 200 OK"),
+        "{final_response:?}"
+    );
+    assert!(
+        final_response.ends_with(b"\r\n\r\nok"),
+        "{final_response:?}"
+    );
+    server.join().unwrap();
+}
+
+#[test]
+fn unsupported_expectation_returns_417_without_reaching_upstream() {
+    let upstream = TcpListener::bind("127.0.0.1:0").unwrap();
+    let proxy_address = free_address();
+    let _proxy = start_proxy(proxy_address, upstream.local_addr().unwrap(), 1_024);
+    let response = send(
+        proxy_address,
+        b"POST / HTTP/1.1\r\nHost: example.test\r\nExpect: custom\r\nContent-Length: 0\r\n\r\n",
+    );
+    assert!(response.starts_with(b"HTTP/1.1 417"), "{response:?}");
+    upstream.set_nonblocking(true).unwrap();
+    assert!(
+        upstream.accept().is_err(),
+        "unsupported expectation reached upstream"
     );
 }
 
