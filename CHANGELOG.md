@@ -5,6 +5,14 @@ after the initial experimental release.
 
 ## [Unreleased]
 
+## [0.3.10] - 2026-08-31
+
+### Changed
+
+- Publish the canonical Polyform release against the portable x86-64 Linux artifact used by
+  production deployments, so generated runtime trust metadata is bound to the deployed binary.
+  Proxy behavior, typed specifications, and independent implementations are unchanged.
+
 ## [0.3.9] - 2026-08-31
 
 ### Fixed
