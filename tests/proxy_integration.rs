@@ -502,6 +502,40 @@ fn chunked_request_is_fully_validated_then_forwarded_with_one_length() {
 }
 
 #[test]
+fn upstream_write_side_remains_open_until_the_response_arrives() {
+    let upstream = TcpListener::bind("127.0.0.1:0").unwrap();
+    let upstream_address = upstream.local_addr().unwrap();
+    let proxy_address = free_address();
+    let server = thread::spawn(move || {
+        let (mut stream, _) = upstream.accept().unwrap();
+        let request = read_request(&mut stream);
+        assert!(request.starts_with(b"GET /delayed HTTP/1.1\r\n"));
+
+        stream.set_nonblocking(true).unwrap();
+        thread::sleep(Duration::from_millis(50));
+        let mut byte = [0_u8; 1];
+        match stream.peek(&mut byte) {
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+            Ok(0) => panic!("proxy half-closed the upstream request before its response"),
+            other => panic!("unexpected upstream socket state: {other:?}"),
+        }
+        stream.set_nonblocking(false).unwrap();
+        stream
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+            .unwrap();
+    });
+    let _proxy = start_proxy(proxy_address, upstream_address, 1_024);
+
+    let response = send(
+        proxy_address,
+        b"GET /delayed HTTP/1.1\r\nHost: example.test\r\nConnection: close\r\n\r\n",
+    );
+    assert!(response.starts_with(b"HTTP/1.1 200 OK"), "{response:?}");
+    assert!(response.ends_with(b"\r\n\r\nok"), "{response:?}");
+    server.join().unwrap();
+}
+
+#[test]
 fn upstream_informational_response_is_not_mistaken_for_a_final_response() {
     let upstream = TcpListener::bind("127.0.0.1:0").unwrap();
     let upstream_address = upstream.local_addr().unwrap();

@@ -4043,9 +4043,6 @@ fn exchange_upstream(
         .and_then(|_| upstream.write_all(&body.bytes))
         .map_err(|_| Fault::Upstream)?;
     drop(body);
-    upstream
-        .shutdown(Shutdown::Write)
-        .map_err(|_| Fault::Upstream)?;
     let (head, remainder) = read_upstream_head(
         &mut upstream,
         runtime.config.limits.max_response_header_bytes,

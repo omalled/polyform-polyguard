@@ -5,6 +5,14 @@ after the initial experimental release.
 
 ## [Unreleased]
 
+## [0.3.9] - 2026-08-31
+
+### Fixed
+
+- Keep the upstream request write side open until the response arrives. The complete request is
+  already delimited by HTTP framing and `Connection: close`; an eager TCP half-close can be
+  interpreted as a client disconnect by otherwise compatible application servers.
+
 ## [0.3.8] - 2026-08-31
 
 ### Fixed
